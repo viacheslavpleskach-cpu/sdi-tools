@@ -1,0 +1,10 @@
+edrsr_vybirka.py
+Реєстр_постанов_ВП_ВС.csv
+__pycache__/
+_cache/
+suddi_*.csv
+suddi_spysky_*.txt
+potochni_cache/
+protokoly_portal_cache/
+rsu_*.csv
+*.part
