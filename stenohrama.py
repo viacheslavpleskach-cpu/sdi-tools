@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Стенограми аудіо- та відеозаписів судових засідань із таймкодами та учасниками. Автор: В'ячеслав Плескач.
 
+Версія 1.2 (16.11.2026): журнали-скани замість HTML (draft --dii CSV), пошук пропусків і обрізаних сегментів
+у власному JSONL (import *.jsonl), --max-tokens, виправлено merge (не «з'їдає» сусідні сегменти). Перевірено на
+справі № 757/3699/26-к (три записи: 8, 10 і 17 хв, лише хмара).
 Версія 1.1 (15.11.2026): гібрид «ПК користувача + хмара» (import / fix / merge), фільтр фантомних фраз і відлуння
 підказки. Перевірено на справі № 487/8888/25 (три записи: 4, 61 і 69 хв).
 
@@ -14,7 +17,8 @@
         збійних сегментів) + *.spans.json (збійні місця й пропуски > 4 с) для перерозпізнавання.
   fix <запис> <spans.json> [--names "..."]   — перерозпізнає в хмарі лише ці відрізки (large-v3).
   merge <local.jsonl> <fix.jsonl>   — зводить якісні локальні сегменти з перерозпізнаним.
-  draft <jsonl> [--protokol html] [--merge 30]   — чернетка «В файлі | Час | Особа | Текст».
+  draft <jsonl> [--protokol html | --dii журнал.csv] [--merge 30]   — чернетка «В файлі | Час | Особа | Текст».
+        Журнал-скан (PDF) переписати в CSV chas,rol,osoba,dia; перший рядок — «Включено відеозапис» (нуль відліку).
 
 Досвід (детальніше — скіл «court-hearing-transcripts»):
   * Хмара Claude: 2 CPU без GPU. large-v3 ≈ 1,2× тривалості запису; turbo ≈ 0,45× (гірше з термінами);
@@ -31,6 +35,11 @@
     фантоми. Фільтруються is_phantom().
   * Позначки секретаря в протоколі ВКЗ запізнюються на 2–10 с і є не для кожної репліки; у залі один мікрофон —
     особу перевіряти за змістом (звертання, питання/відповідь, самопредставлення).
+  * large-v3 на віддаленому від мікрофона мовленні ставить no_speech_prob 0,6–0,8 і викидає цілі 30-с вікна
+    (пропуски по 1–1,5 хв при гучному звуці). Шлях: import <свій>.jsonl → fix --model turbo (turbo такі місця
+    розпізнає хоч фрагментарно) → merge. Вимкнення VAD / порогу тиші для large-v3 не допомагає.
+  * max_new_tokens=220 обрізає щільні 30-с сегменти посеред слова; import позначає їх (≥ 20 с без кінцевого
+    розділового знака) як збійні, fix --max-tokens 0 --model large-v3 їх перерозпізнає повністю.
   * Записи ВКЗ часто починаються після «Засідання розпочато» — перші слова можуть бути втрачені.
 """
 import argparse, html, json, os, re, subprocess, sys, time, wave
@@ -46,6 +55,13 @@ PROMPT = "Судове засідання. Головуючий суддя, се
 DECODE = dict(language="uk", vad_filter=True, vad_parameters={"min_silence_duration_ms": 500},
               condition_on_previous_text=False, temperature=[0.0, 0.4], max_new_tokens=220, repetition_penalty=1.1)
 PROMPT_MAX_WORDS = 30  # довша підказка (> ~224 токенів) змушує Whisper зависати на тиші
+
+
+def decode(a):
+    d = dict(DECODE)
+    if getattr(a, "max_tokens", None) is not None:
+        d["max_new_tokens"] = a.max_tokens or None
+    return d
 
 
 def make_prompt(names):
@@ -146,7 +162,7 @@ def cmd_transcribe(a):
     prompt = make_prompt(a.names)
     m = WhisperModel(MODELS.get(a.model, a.model), device="cpu", compute_type="int8", cpu_threads=os.cpu_count())
     t0 = time.time()
-    segs, _ = m.transcribe(audio, beam_size=a.beam, initial_prompt=prompt, **DECODE)
+    segs, _ = m.transcribe(audio, beam_size=a.beam, initial_prompt=prompt, **decode(a))
     with open(out, "a", encoding="utf-8") as f:
         for s in segs:
             if is_phantom(s.text, prompt):
@@ -179,7 +195,11 @@ def is_phantom(text, prompt=PROMPT):
     for i in range(len(words) - 3):
         if " ".join(words[i:i + 4]) in pw:
             cov.update(range(i, i + 4))
-    return len(cov) / len(words) >= 0.6  # сегмент здебільшого повторює підказку
+    if len(cov) / len(words) >= 0.6:  # сегмент здебільшого повторює підказку
+        return True
+    # перекручене відлуння («Головуючий суддя Вовк, секретар суддя Ємець, …»): майже всі слова — з підказки
+    pv = set(pw.split()) | {"суддя", "секретар", "головуючий", "слідчий"}
+    return sum(w in pv for w in words) / len(words) >= 0.9  # 0,75 відкидало справжнє «… з'явилися»
 
 
 def is_bad(s):
@@ -189,10 +209,17 @@ def is_bad(s):
 
 def cmd_import(a):
     """JSON Faster-Whisper-XXL (або openai-whisper) → наш JSONL + файл відрізків для перерозпізнавання."""
-    S = json.load(open(a.json, encoding="utf-8"))["segments"]
-    segs = [{"s": round(s["start"], 2), "e": round(s["end"], 2), "t": s["text"].strip(),
-             "lp": round(s.get("avg_logprob", 0), 2), "temp": s.get("temperature", 0),
-             "cr": round(s.get("compression_ratio", 0), 2)} for s in S]
+    if a.json.endswith(".jsonl"):  # власний JSONL хмари (transcribe) — шукати пропуски мовлення для turbo-доповнення
+        segs = [json.loads(l) for l in open(a.json, encoding="utf-8") if l.strip()]
+        segs = [s for s in segs if not is_phantom(s["t"], make_prompt(a.names))]
+        for s in segs:  # обрізаний max_new_tokens сегмент: довгий і без кінцевого розділового знака
+            if s["e"] - s["s"] >= 20 and not s["t"].rstrip().endswith((".", "?", "!", "…")):
+                s["cr"] = 9.9
+    else:
+        S = json.load(open(a.json, encoding="utf-8"))["segments"]
+        segs = [{"s": round(s["start"], 2), "e": round(s["end"], 2), "t": s["text"].strip(),
+                 "lp": round(s.get("avg_logprob", 0), 2), "temp": s.get("temperature", 0),
+                 "cr": round(s.get("compression_ratio", 0), 2)} for s in S]
     dur = a.duration or (segs[-1]["e"] if segs else 0)
     spans = [[s["s"] - 0.5, s["e"] + 0.5] for s in segs if is_bad(s)]
     pts = [(0, 0)] + [(s["s"], s["e"]) for s in segs] + [(dur, dur)]
@@ -204,7 +231,7 @@ def cmd_import(a):
             m[-1][1] = max(m[-1][1], y)
         else:
             m.append([x, y])
-    base = os.path.splitext(a.out or a.json)[0]
+    base = os.path.splitext(a.out or a.json)[0].replace(".large-v3", "")
     with open(base + ".local.jsonl", "w", encoding="utf-8") as f:
         for s in segs:
             s["bad"] = is_bad(s); f.write(json.dumps(s, ensure_ascii=False) + "\n")
@@ -234,7 +261,7 @@ def cmd_fix(a):
         n += 1
         w.setpos(int(x * sr))
         audio = np.frombuffer(w.readframes(int((y - x) * sr)), dtype=np.int16).astype(np.float32) / 32768.0
-        segs, _ = m.transcribe(audio, beam_size=a.beam, initial_prompt=prompt, **DECODE)
+        segs, _ = m.transcribe(audio, beam_size=a.beam, initial_prompt=prompt, **decode(a))
         res = [{"s": round(s.start + x, 2), "e": round(s.end + x, 2), "t": s.text.strip(), "lp": round(s.avg_logprob, 2)}
                for s in segs if not is_phantom(s.text, prompt)]
         with open(out, "a", encoding="utf-8") as f:
@@ -248,7 +275,10 @@ def cmd_merge(a):
     loc = [json.loads(l) for l in open(a.local, encoding="utf-8")]
     fix = [json.loads(l) for l in open(a.fix, encoding="utf-8")]
     spans = [(r["a"], r["b"]) for r in fix]
-    keep = [s for s in loc if not s.get("bad") and not any(min(s["e"], y) - max(s["s"], x) > 0.3 for x, y in spans)]
+    # сегмент відкидається, лише якщо відрізок перекриває його більш ніж наполовину (запас ±0,5 с на межах
+    # відрізків інакше «з'їдає» сусідні якісні сегменти)
+    keep = [s for s in loc if not s.get("bad") and
+            not any(min(s["e"], y) - max(s["s"], x) > max(0.3, 0.5 * (s["e"] - s["s"])) for x, y in spans)]
     allseg = [s for s in keep if not is_phantom(s["t"])] + [dict(s, src="fix") for r in fix for s in r["segs"] if not is_phantom(s["t"])]
     allseg.sort(key=lambda s: s["s"])
     out = a.out or a.local.replace(".local.jsonl", ".merged.jsonl")
@@ -283,6 +313,12 @@ def cmd_draft(a):
         p = parse_protokol(a.protokol)
         start = start or p["start"]
         dii = [(to_sec(d["chas"]), short(d["rol"], d["osoba"])) for d in p["dii"] if d["osoba"]]
+    elif a.dii:  # журнал-скан, переписаний у CSV: chas,rol,osoba,dia
+        import csv
+        rows = list(csv.DictReader(open(a.dii, encoding="utf-8")))
+        st = [r["chas"] for r in rows if "Включено відеозапис" in r.get("dia", "")]
+        start = start or (st[0] if st else rows[0]["chas"])
+        dii = [(to_sec(r["chas"]), short(r["rol"], r["osoba"])) for r in rows if r.get("osoba")]
     t0 = to_sec(start) if start else None
     rows = ["| В файлі | Час | Особа | Текст |", "| --- | --- | --- | --- |"]
     prev, row_start = None, 0.0
@@ -314,17 +350,19 @@ def main():
     t = sp.add_parser("transcribe"); t.add_argument("audio"); t.add_argument("--model", default="large-v3")
     t.add_argument("--names", default=""); t.add_argument("--out")
     t.add_argument("--beam", type=int, default=3)
+    t.add_argument("--max-tokens", dest="max_tokens", type=int, default=None, help="ліміт токенів сегмента; 0 — без ліміту")
     t.add_argument("--from", dest="from_", type=float, default=0.0, help="секунда початку")
     t.add_argument("--to", type=float, default=None, help="секунда кінця")
     i = sp.add_parser("import"); i.add_argument("json"); i.add_argument("--duration", type=float)
     i.add_argument("--gap", type=float, default=4.0, help="пропуск між сегментами, що вважається втраченим мовленням, с")
-    i.add_argument("--out")
+    i.add_argument("--out"); i.add_argument("--names", default="", help="для відсіву відлуння підказки (JSONL)")
     x = sp.add_parser("fix"); x.add_argument("audio"); x.add_argument("spans"); x.add_argument("--model", default="large-v3")
     x.add_argument("--names", default=""); x.add_argument("--out")
     x.add_argument("--beam", type=int, default=3, help="1 — для фрагмента, на якому процес убивається через пам'ять")
+    x.add_argument("--max-tokens", dest="max_tokens", type=int, default=None, help="0 — без ліміту (обрізані сегменти)")
     x.add_argument("--limit", type=int, default=0, help="скільки відрізків за запуск (порції; 0 — усі)")
     g = sp.add_parser("merge"); g.add_argument("local"); g.add_argument("fix"); g.add_argument("--out")
-    d = sp.add_parser("draft"); d.add_argument("jsonl"); d.add_argument("--protokol"); d.add_argument("--start")
+    d = sp.add_parser("draft"); d.add_argument("jsonl"); d.add_argument("--protokol"); d.add_argument("--start"); d.add_argument("--dii", help="журнал-скан у CSV: chas,rol,osoba,dia")
     d.add_argument("--out"); d.add_argument("--lag", type=float, default=3.0, help="запізнення позначок секретаря, с")
     d.add_argument("--min-lp", dest="min_lp", type=float, default=-0.6, help="поріг avg_logprob для позначки [?]")
     d.add_argument("--merge", type=float, default=0, help="зливати поспіль репліки однієї особи в рядок до N секунд (напр. 30)")
