@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Стенограми аудіо- та відеозаписів судових засідань із таймкодами та учасниками. Автор: В'ячеслав Плескач.
 
+Версія 1.3 (16.11.2026): --no-prompt для transcribe / fix (вікна, де модель повторює підказку замість мовлення),
+fix --only <номери відрізків> — перерозпізнати лише вибрані відрізки з spans.json. Перевірено на справі
+№ 757/58906/24-к (три записи: 0,7, 4 і 23 хв).
 Версія 1.2 (16.11.2026): журнали-скани замість HTML (draft --dii CSV), пошук пропусків і обрізаних сегментів
 у власному JSONL (import *.jsonl), --max-tokens, виправлено merge (не «з'їдає» сусідні сегменти). Перевірено на
 справі № 757/3699/26-к (три записи: 8, 10 і 17 хв, лише хмара).
@@ -11,11 +14,11 @@
   fetch  <file_id|url> ... [--out DIR]   — завантаження з Google Диска напряму (файл/тека доступні за посиланням).
   protokol <протокол.html> [--csv OUT]   — розбір протоколу технічної фіксації ВКЗ: склад, файл запису,
         час «Включено відеозапис» (нуль відліку), посекундні дії учасників.
-  transcribe <запис> [--model large-v3|turbo] [--names "..."] [--from/--to с]   — розпізнавання в хмарі
+  transcribe <запис> [--model large-v3|turbo] [--names "..."] [--from/--to с] [--no-prompt]   — розпізнавання в хмарі
         (faster-whisper, uk), JSONL пишеться по сегменту; перерваний запуск продовжується тією ж командою.
   import <xxl.json> [--duration с]   — JSON Faster-Whisper-XXL з ПК користувача → *.local.jsonl (з позначкою
         збійних сегментів) + *.spans.json (збійні місця й пропуски > 4 с) для перерозпізнавання.
-  fix <запис> <spans.json> [--names "..."]   — перерозпізнає в хмарі лише ці відрізки (large-v3).
+  fix <запис> <spans.json> [--names "..."] [--model turbo] [--only 3,7] [--no-prompt]   — перерозпізнає в хмарі лише ці відрізки.
   merge <local.jsonl> <fix.jsonl>   — зводить якісні локальні сегменти з перерозпізнаним.
   draft <jsonl> [--protokol html | --dii журнал.csv] [--merge 30]   — чернетка «В файлі | Час | Особа | Текст».
         Журнал-скан (PDF) переписати в CSV chas,rol,osoba,dia; перший рядок — «Включено відеозапис» (нуль відліку).
@@ -62,6 +65,11 @@ def decode(a):
     if getattr(a, "max_tokens", None) is not None:
         d["max_new_tokens"] = a.max_tokens or None
     return d
+
+
+def prompt_of(a):
+    """initial_prompt для запуску: None з --no-prompt (на вікнах, де модель повторює підказку замість мовлення)."""
+    return None if getattr(a, "no_prompt", False) else make_prompt(a.names)
 
 
 def make_prompt(names):
@@ -159,13 +167,13 @@ def cmd_transcribe(a):
         print(f"Вже розпізнано: {out}"); return
     w.setpos(int(start * sr))
     audio = np.frombuffer(w.readframes(int((end - start) * sr)), dtype=np.int16).astype(np.float32) / 32768.0
-    prompt = make_prompt(a.names)
+    prompt = prompt_of(a)
     m = WhisperModel(MODELS.get(a.model, a.model), device="cpu", compute_type="int8", cpu_threads=os.cpu_count())
     t0 = time.time()
     segs, _ = m.transcribe(audio, beam_size=a.beam, initial_prompt=prompt, **decode(a))
     with open(out, "a", encoding="utf-8") as f:
         for s in segs:
-            if is_phantom(s.text, prompt):
+            if is_phantom(s.text, prompt or PROMPT):
                 continue
             f.write(json.dumps({"s": round(s.start + start, 2), "e": round(s.end + start, 2), "t": s.text.strip(),
                                 "lp": round(s.avg_logprob, 2), "ns": round(s.no_speech_prob, 2)},
@@ -251,10 +259,11 @@ def cmd_fix(a):
     done = {json.loads(l)["span"] for l in open(out, encoding="utf-8")} if os.path.exists(out) else set()
     m = WhisperModel(MODELS.get(a.model, a.model), device="cpu", compute_type="int8", cpu_threads=os.cpu_count())
     w = wave.open(wav); sr = w.getframerate()
-    prompt = make_prompt(a.names)
+    prompt = prompt_of(a)
+    only = {int(v) for v in a.only.split(",")} if a.only else None
     t_all = time.time(); aud = 0; n = 0
     for i, (x, y) in enumerate(spans):
-        if i in done:
+        if i in done or (only is not None and i not in only):
             continue
         if a.limit and n >= a.limit:
             break
@@ -263,7 +272,7 @@ def cmd_fix(a):
         audio = np.frombuffer(w.readframes(int((y - x) * sr)), dtype=np.int16).astype(np.float32) / 32768.0
         segs, _ = m.transcribe(audio, beam_size=a.beam, initial_prompt=prompt, **decode(a))
         res = [{"s": round(s.start + x, 2), "e": round(s.end + x, 2), "t": s.text.strip(), "lp": round(s.avg_logprob, 2)}
-               for s in segs if not is_phantom(s.text, prompt)]
+               for s in segs if not is_phantom(s.text, prompt or PROMPT)]
         with open(out, "a", encoding="utf-8") as f:
             f.write(json.dumps({"span": i, "a": x, "b": y, "segs": res}, ensure_ascii=False) + "\n")
         aud += y - x
@@ -353,6 +362,7 @@ def main():
     t.add_argument("--max-tokens", dest="max_tokens", type=int, default=None, help="ліміт токенів сегмента; 0 — без ліміту")
     t.add_argument("--from", dest="from_", type=float, default=0.0, help="секунда початку")
     t.add_argument("--to", type=float, default=None, help="секунда кінця")
+    t.add_argument("--no-prompt", dest="no_prompt", action="store_true", help="без initial_prompt (проти відлуння підказки)")
     i = sp.add_parser("import"); i.add_argument("json"); i.add_argument("--duration", type=float)
     i.add_argument("--gap", type=float, default=4.0, help="пропуск між сегментами, що вважається втраченим мовленням, с")
     i.add_argument("--out"); i.add_argument("--names", default="", help="для відсіву відлуння підказки (JSONL)")
@@ -361,6 +371,8 @@ def main():
     x.add_argument("--beam", type=int, default=3, help="1 — для фрагмента, на якому процес убивається через пам'ять")
     x.add_argument("--max-tokens", dest="max_tokens", type=int, default=None, help="0 — без ліміту (обрізані сегменти)")
     x.add_argument("--limit", type=int, default=0, help="скільки відрізків за запуск (порції; 0 — усі)")
+    x.add_argument("--no-prompt", dest="no_prompt", action="store_true", help="без initial_prompt (проти відлуння підказки)")
+    x.add_argument("--only", help="номери відрізків зі spans.json через кому (лише їх)")
     g = sp.add_parser("merge"); g.add_argument("local"); g.add_argument("fix"); g.add_argument("--out")
     d = sp.add_parser("draft"); d.add_argument("jsonl"); d.add_argument("--protokol"); d.add_argument("--start"); d.add_argument("--dii", help="журнал-скан у CSV: chas,rol,osoba,dia")
     d.add_argument("--out"); d.add_argument("--lag", type=float, default=3.0, help="запізнення позначок секретаря, с")
