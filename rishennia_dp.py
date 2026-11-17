@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 """Проєкт рішення Дисциплінарної палати ВРП на основі висновку дисциплінарного інспектора
-за результатами підготовки дисциплінарної справи до розгляду. Версія 1.1 (17.11.2026).
+за результатами підготовки дисциплінарної справи до розгляду, а також проєкт ухвали про відкриття
+дисциплінарної справи на основі висновку за результатами попередньої перевірки (kind "vidkryttia").
+Версія 1.2 (17.11.2026).
 Автор: В'ячеслав Плескач. Правила — скіл «proiekt-rishennia-dp»; довідка зі зразками — «Інструкція_рішення_ДП.md» у проєкті «СДІ».
 
   python3 rishennia_dp.py extract --in ВИСНОВОК.docx --out vysnovok.md
@@ -12,8 +14,9 @@
   python3 rishennia_dp.py template --from РІШЕННЯ_ПАЛАТИ.docx --out Шаблон_рішення_ДП.docx
       перезбирає шаблон шапки й кінця з готового рішення палати
 
-Формат data.json — розділ 10 інструкції. Коротко:
-  {"kind": "prytiahnennia" | "vidmova", "date": "…", "title": "…", "intro": "…",
+Формат data.json — у скілі. Коротко:
+  {"kind": "prytiahnennia" | "vidmova" | "vidkryttia", "date": "…", "title": "…", "intro": "…",
+   "pidsumok": "Розглянувши висновок … (лише vidkryttia)", "zakl": N | null (необов'язково),
    "operative": ["…", "…"], "composition": {"chair": "…", "members": ["…"]},
    "keruiuchys": "…" (необов'язково), "edits": [{"p": 12, "old": "…", "new": "…"},
    {"p": 40, "delete": true}, {"after": 55, "text": "…", "like": 54}]}
@@ -41,7 +44,27 @@ APPEAL = ('Рішення Третьої Дисциплінарної палат
 OSNOVA = ('на підставі статті 106 Закону України «Про судоустрій і статус суддів», статей 34, 49, 50 '
           'Закону України «Про Вищу раду правосуддя» Третя Дисциплінарна палата Вищої ради правосуддя')
 KERUIUCHYS = {'prytiahnennia': 'Керуючись викладеним, ' + OSNOVA,
-              'vidmova': 'На підставі' + OSNOVA[len('на підставі'):]}
+              'vidmova': 'На підставі' + OSNOVA[len('на підставі'):],
+              'vidkryttia': ('Керуючись статтею 46 Закону України «Про Вищу раду правосуддя», статтею 106 Закону '
+                             'України «Про судоустрій і статус суддів», пунктом 13.21 Регламенту Вищої ради '
+                             'правосуддя, Третя Дисциплінарна палата Вищої ради правосуддя')}
+TEMPLATES = {'prytiahnennia': 'Шаблон_рішення_ДП.docx', 'vidmova': 'Шаблон_рішення_ДП.docx',
+             'vidkryttia': 'Шаблон_ухвали_відкриття_ДП.docx'}
+APPEALS = {'vidkryttia': 'Ухвала оскарженню не підлягає.'}
+PIDSUMOK_START = ('Розглянувши висновок дисциплінарного інспектора Вищої ради правосуддя Плескача В.Ю. за результатами '
+                  'попередньої перевірки дисциплінарної скарги, Третя Дисциплінарна палата Вищої ради правосуддя '
+                  'вважає, що наведені у скарзі та встановлені фактичні обставини можуть свідчити про наявність у діях ')
+PEREVIRKA = ('Перевірка та дослідження наведених обставин будуть здійснюватися дисциплінарним інспектором '
+             'під час підготовки дисциплінарної справи до розгляду.')
+# самопосилання «Висновок» → назва документа палати
+AUTO = {'rishennia': [('цього Висновку', 'цього рішення'), ('цьому Висновку', 'цьому рішенні'),
+                      ('до Висновку', 'до рішення'), ('цей Висновок', 'це рішення')],
+        'ukhvala': [('цього Висновку', 'цієї ухвали'), ('цьому Висновку', 'цій ухвалі'),
+                    ('до Висновку', 'до ухвали'), ('цей Висновок', 'ця ухвала')]}
+# відомості про призначення / обрання судді наприкінці висновку попередньої перевірки
+APPOINT = re.compile(r'(Указом Президента України|Постановою Верховної Ради України|[Рр]ішенням Вищої ради правосуддя)'
+                     r'.{0,250}?\b(призначен|обран|переведен)', re.S)
+ZAKL = re.compile(r'Пропоную\s+відкрити\s+дисциплінарн')
 
 
 def w(tag):
@@ -233,7 +256,10 @@ TOK = re.compile(r'\w+|\s+|[^\w\s]', re.U)
 
 
 def tracked_replace(p, old, new, tr, n=1, strict=True, whole=False):
-    txt = ptext(p)
+    # нерозривний пробіл у висновку = звичайний у "old" (у vysnovok.md вони не розрізняються);
+    # довжина та сама, тож позиції збігаються, а незмінені нерозривні пробіли зберігаються
+    txt = ptext(p).replace('\xa0', ' ')
+    old = old.replace('\xa0', ' ')
     idx, k = -1, 0
     while k < n:
         idx = txt.find(old, idx + 1)
@@ -333,6 +359,10 @@ def tracked_insert_para(after_p, text, like_p, tr, plain=False):
     rpr = ppr.find(w('rPr'))
     if rpr is None:
         rpr = etree.SubElement(ppr, w('rPr'))
+    for x in rpr.findall(w('ins')) + rpr.findall(w('del')):   # позначки правок абзацу-зразка не копіювати
+        rpr.remove(x)
+    for x in ppr.findall(w('pPrChange')):
+        ppr.remove(x)
     rpr.insert(0, tr.mark('ins'))
     np_.append(ppr)
     ins = tr.mark('ins')
@@ -448,6 +478,15 @@ def locate(pkg):
         last -= 1
     loc['last'] = last
     loc['propose_items'] = list(range(loc['propose'] + 1, last + 1)) if loc['propose'] is not None else []
+    # тип висновку: попередня перевірка (→ ухвала про відкриття) чи підготовка справи до розгляду (→ рішення)
+    head = ' '.join(T[:loc['proc'] or 0])
+    loc['tip'] = 'poperednia' if 'попередньої перевірки' in head else 'pidhotovka'
+    # підсумковий абзац з пропозицією відкрити справу і відомості про призначення після нього
+    lo = loc['ocinka'] if loc['ocinka'] is not None else (loc['proc'] or 0)
+    zk = [i for i in range(lo, last + 1) if ZAKL.search(T[i])]
+    loc['zakl'] = loc['propose'] if loc['propose'] is not None else (zk[-1] if zk else None)
+    tail_from = loc['zakl'] + 1 if loc['zakl'] is not None else max(lo, last - 4)
+    loc['appoint'] = [i for i in range(tail_from, last + 1) if T[i] and APPOINT.search(T[i])]
     return loc
 
 
@@ -464,6 +503,27 @@ HINTS = [
     ('Кандидати на зміни по суті — лише для звіту, НЕ змінювати',
      re.compile(r'11-125сап20|/[12]дп/|Посібник|URL:|https?://')),
 ]
+# для висновку попередньої перевірки (ухвала про відкриття) — інші підказки
+HINTS_VIDKRYTTIA = [
+    ('Самопосилання «Висновок» (крім «цього Висновку», «до Висновку» — їх скрипт замінює сам)',
+     re.compile(r'(?<!цього )(?<!до )\bВисновк\w*')),
+    ('Ствердні висновки про дії судді (кандидати на гіпотезу: «могла не навести», «міг бути», «може не відповідати»)',
+     re.compile(r'\b(вочевидь|очевидно|фактично|безумовно|свідчить|підтверджується|не навів|не навела|не врахував|'
+                r'не врахувала|не надав|не надала|порушив|порушила|допустив|допустила|стало|призвело)\b', re.I)),
+    ('Безособові оцінкові звороти і «встановлено» (кандидати на голос палати)',
+     re.compile(r'^(Очевидно|Варто|Слід|Потрібно|Необхідно|Незайвим|Безумовно|Важливо|Належить|Додатково|Аналіз|'
+                r'При цьому|Під час попередньої перевірки[^,]*встановлено|Встановлено|Оцінюючи)|належить урахувати|'
+                r'варто зауважити|доходжу висновку', re.I)),
+    ('Перша особа інспектора', re.compile(r'\b(вважаю|пропоную|доходжу|на мою думку|вбачаю|переконаний|зазначу|наголошу|'
+                                          r'звертаю увагу|констатую|уважаю|мною)\b', re.I)),
+    ('Робота інспектора в розділі III (запити, додаткові пояснення, межі попередньої перевірки, пошук у ЄДРСР)',
+     re.compile(r'дисциплінарн\w* інспектор|попередньої перевірки|додатков\w* поясненн|запит\w*|ЄДРСР|не виявлено|'
+                r'нез’ясован', re.I)),
+    ('«Ознаки» (у тексті ухвали НЕ переводити у ствердну форму)', re.compile(r'ознак\w*', re.I)),
+    ('Кандидати на зміни по суті — лише для звіту, НЕ змінювати',
+     re.compile(r'11-125сап20|/[12]дп/|ухвалою від .{0,40}відкрила дисциплінарну справу|Конституційний Суд|'
+                r'Суду справедливості|Посібник|URL:|https?://')),
+]
 
 
 def cmd_extract(a):
@@ -478,9 +538,19 @@ def cmd_extract(a):
            'Текст подано після технічних виправлень (апостроф, тире, діапазони, подвійні пробіли) — '
            'саме з ним звіряються "old" у data.json. Індекс [pN] — для "p", "after", "like". † — виноска.', '']
     out.append('## Розмітка')
-    for k in ('proc', 'ocinka', 'propose', 'last', 'dodatky', 'sig'):
+    vid = loc['tip'] == 'poperednia'
+    out.append('- тип висновку: ' + ('попередня перевірка → проект УХВАЛИ про відкриття (kind "vidkryttia")' if vid
+                                    else 'підготовка справи до розгляду → проект РІШЕННЯ'))
+    for k in ('proc', 'ocinka', 'propose', 'zakl', 'last', 'dodatky', 'sig'):
         out.append(f'- {k}: {"p" + str(loc[k]) if loc[k] is not None else "—"}')
-    out.append(f'- propose_items: {", ".join("p%d" % i for i in loc["propose_items"]) or "—"}')
+    if vid:
+        out.append(f'- appoint (відомості про призначення — скрипт вилучає правкою): '
+                   f'{", ".join("p%d" % i for i in loc["appoint"]) or "—"}')
+        if loc['zakl'] is not None:
+            rest = [i for i in range(loc['zakl'] + 1, loc['last'] + 1) if T[i] and i not in loc['appoint']]
+            out.append(f'- після zakl залишаються: {", ".join("p%d" % i for i in rest) or "—"}')
+    else:
+        out.append(f'- propose_items: {", ".join("p%d" % i for i in loc["propose_items"]) or "—"}')
     out.append(f'- appendix: {", ".join("p%d" % i for i in loc["appendix"]) or "—"}')
     out.append('')
     out.append('## Абзаци до розділу I (шапка висновку; у рішенні замінюється)')
@@ -519,9 +589,10 @@ def cmd_extract(a):
         for i in loc['appendix']:
             out.append(f'[p{i}] {T[i]}')
     out.append('')
-    out.append('## Підказки')
-    for title, rx in HINTS:
-        hits = [i for i in range(end_head, stop) if T[i] and rx.search(T[i])
+    out.append('## Підказки' + (' (ухвала про відкриття; розділи I–II — без змін, підказки лише з розділу III)' if vid else ''))
+    hint_from = (loc['ocinka'] or end_head) if vid else end_head
+    for title, rx in (HINTS_VIDKRYTTIA if vid else HINTS):
+        hits = [i for i in range(hint_from, stop) if T[i] and rx.search(T[i])
                 and next(P[i].iterancestors(w('tbl')), None) is None]
         out.append(f'### {title}: {len(hits)}')
         for i in hits:
@@ -530,8 +601,8 @@ def cmd_extract(a):
             out.append(f'- [p{i}] …{T[i][s:m.end() + 120]}…')
     with open(a.out, 'w', encoding='utf8') as f:
         f.write('\n'.join(out) + '\n')
-    print(f'{a.out}: {sum(1 for t in T if t)} непорожніх абзаців; розмітка:',
-          {k: loc[k] for k in ('proc', 'ocinka', 'propose', 'last', 'dodatky', 'sig')})
+    print(f'{a.out}: {sum(1 for t in T if t)} непорожніх абзаців; тип: {loc["tip"]}; розмітка:',
+          {k: loc[k] for k in ('proc', 'ocinka', 'propose', 'zakl', 'last', 'dodatky', 'sig')})
 
 
 def technical_fixes(pkg):
@@ -616,6 +687,10 @@ def add_media(pkg, media):
 def cmd_build(a):
     data = json.load(open(a.data, encoding='utf8'))
     kind = data.get('kind', 'prytiahnennia')
+    if kind not in KERUIUCHYS:
+        sys.exit(f'Невідомий kind: {kind} (prytiahnennia / vidmova / vidkryttia)')
+    vid = kind == 'vidkryttia'
+    template = a.template or os.path.join(HERE, TEMPLATES[kind])
     pkg = Pkg(a.inp)
     for p in pkg.paras():
         clean_para(p)
@@ -626,11 +701,16 @@ def cmd_build(a):
         sys.exit('Не знайдено заголовок «І. ПРОЦЕДУРНІ ПИТАННЯ»')
     tr = Tracker()
     report, errors = [], []
+    if vid and loc['tip'] != 'poperednia':
+        report.append('УВАГА: kind "vidkryttia", але шапка висновку не містить «попередньої перевірки»')
+    if not vid and loc['tip'] == 'poperednia':
+        report.append('УВАГА: висновок за результатами попередньої перевірки, а kind — не "vidkryttia"')
+    if vid and not str(data.get('pidsumok', '')).startswith('Розглянувши висновок'):
+        sys.exit('Для kind "vidkryttia" потрібне поле "pidsumok", що починається з «Розглянувши висновок…»')
     body_range = range(loc['proc'], loc['last'] + 1)
 
-    # 1. Автоматичні правки: самопосилання «Висновок» → «рішення» (у режимі правок)
-    auto = [('цього Висновку', 'цього рішення'), ('цьому Висновку', 'цьому рішенні'),
-            ('до Висновку', 'до рішення'), ('цей Висновок', 'це рішення')]
+    # 1. Автоматичні правки: самопосилання «Висновок» → «рішення» / «ухвала» (у режимі правок)
+    auto = AUTO['ukhvala' if vid else 'rishennia']
     nauto = 0
     for i in body_range:
         for old, new in auto:
@@ -667,7 +747,37 @@ def cmd_build(a):
 
     # 3. Пропозиція інспектора → «Керуючись…» (у режимі правок)
     ker = data.get('keruiuchys') or KERUIUCHYS[kind]
-    if loc['propose'] is not None:
+    if vid:
+        # ухвала про відкриття: підсумковий абзац висновку («… наявні ознаки … Пропоную відкрити…») і відомості
+        # про призначення вилучаються; наприкінці — «Розглянувши висновок…», «Перевірка…», «Керуючись…»
+        zakl = data['zakl'] if 'zakl' in data else loc['zakl']
+        if zakl is not None and not (loc['proc'] <= zakl <= loc['last']):
+            errors.append(f'zakl p{zakl} поза мотивувальною частиною'); zakl = None
+        numbered = [i for i in body_range if T[i] and P[i].find(f'{w("pPr")}/{w("numPr")}') is not None
+                    and next(P[i].iterancestors(w('tbl')), None) is None]
+        like = P[zakl] if zakl is not None and zakl in numbered else (P[numbered[-1]] if numbered else P[loc['last']])
+        like = copy.deepcopy(like)                                 # зразок форматування до вилучень
+        deleted = []
+        if zakl is not None:
+            tracked_delete_para(P[zakl], tr); deleted.append(zakl)
+            report.append(f'підсумковий абзац висновку p{zakl} вилучено правкою')
+        else:
+            report.append('УВАГА: абзац «Пропоную відкрити…» не знайдено — підсумок висновку не вилучено')
+        for i in loc['appoint']:
+            if i not in deleted:
+                tracked_delete_para(P[i], tr); deleted.append(i)
+        if loc['appoint']:
+            report.append('відомості про призначення вилучено правками: ' + ', '.join('p%d' % i for i in loc['appoint']))
+        if zakl is not None:
+            rest = [i for i in range(zakl + 1, loc['last'] + 1) if T[i] and i not in deleted]
+            if rest:
+                report.append('після підсумкового абзацу залишилися абзаци ' + ', '.join('p%d' % i for i in rest)
+                              + ' — перевірити (кандидати для звіту)')
+        p1 = tracked_insert_para(P[loc['last']], data['pidsumok'], like, tr)
+        p2 = tracked_insert_para(p1, PEREVIRKA, like, tr)
+        last_p = tracked_insert_para(p2, ker, like, tr, plain=True)
+        report.append('додано правками: «Розглянувши висновок…», «Перевірка та дослідження…», «Керуючись…»')
+    elif loc['propose'] is not None:
         pp = P[loc['propose']]
         tracked_replace(pp, ptext(pp), ker, tr, whole=True)
         if pp.find(w('pPr')) is not None:
@@ -682,7 +792,8 @@ def cmd_build(a):
         last_p = tracked_insert_para(P[loc['last']], ker, P[loc['last']], tr, plain=True)
         report.append(f'абзац «{ker[:30]}…» додано правкою після p{loc["last"]}')
 
-    for e in sorted(inserts, key=lambda e: -e['after']):
+    # з кінця; кілька вставок після одного абзацу — у порядку data.json
+    for e in [x for _, x in sorted(enumerate(inserts), key=lambda t: (-t[1]['after'], -t[0]))]:
         try:
             i = e['after']
             if not (loc['proc'] <= i <= loc['last']):
@@ -698,7 +809,7 @@ def cmd_build(a):
         errors.append('не знайдено заголовок «ІІІ. ОЦІНКА СКАРГИ» — назву розділу III не змінено')
 
     # 5. Кінець (напряму): від «Додатки:» / підпису інспектора до першого додатка або розриву розділу
-    head_t, tail_t, media = load_template(a.template)
+    head_t, tail_t, media = load_template(template)
     top = list(pkg.body)
 
     def top_of(p):
@@ -737,7 +848,7 @@ def cmd_build(a):
             if len(comp['members']) < 2:
                 del new_tail[-2:]
         else:
-            fill(el, {'APPEAL': data.get('appeal', APPEAL), 'CHAIR': comp['chair'],
+            fill(el, {'APPEAL': data.get('appeal', APPEALS.get(kind, APPEAL)), 'CHAIR': comp['chair'],
                       'MEMBER1': comp['members'][0] if comp['members'] else ''})
             new_tail.append(el)
     style_ids = set(re.findall(r'w:styleId="([^"]+)"', pkg.files.get('word/styles.xml', b'').decode('utf8')))
@@ -757,7 +868,7 @@ def cmd_build(a):
         anchor.addnext(el); anchor = el
     for i in loc['appendix']:
         p = P[i]
-        set_para_text(p, re.sub(r'до\s+Висновку', 'до рішення', ptext(p)))
+        set_para_text(p, re.sub(r'до\s+Висновку', 'до ухвали' if vid else 'до рішення', ptext(p)))
 
     # 6. Шапка (напряму): усе до «І. ПРОЦЕДУРНІ ПИТАННЯ» замінюється шапкою шаблону
     proc_top = top_of(P[loc['proc']])
@@ -785,7 +896,8 @@ def cmd_build(a):
     # звіт
     print(f'Збережено: {a.out}')
     print(f'- технічних виправлень (напряму): {nfix}')
-    print(f'- автоматичних замін «Висновок → рішення» (правками): {nauto}')
+    print(f'- вид документа: {"ухвала про відкриття дисциплінарної справи" if vid else "рішення"}; шаблон: {os.path.basename(template)}')
+    print(f'- автоматичних замін «Висновок → {"ухвала" if vid else "рішення"}» (правками): {nauto}')
     print(f'- правок з data.json: {len(edits) - len([x for x in errors if x.startswith(("edit", "insert"))])} з {len(edits)}')
     print(f'- елементів кінця висновку вилучено: {removed}; додатків: {len(loc["appendix"])}')
     for r in report:
@@ -832,13 +944,13 @@ def cmd_check(a):
 
 # ───────────────────────── побудова шаблону ─────────────────────────
 def cmd_template(a):
-    """Шаблон з готового рішення палати: шапка (до «встановила:» включно + порожній абзац),
-    {{BODY}}, кінець (від порожнього абзацу перед «вирішила:»)."""
+    """Шаблон з готового рішення (ухвали) палати: шапка (до «встановила:» включно + порожній абзац),
+    {{BODY}}, кінець (від порожнього абзацу перед «вирішила:» / «ухвалила:»)."""
     pkg = Pkg(getattr(a, 'from'))
     kids = [k for k in pkg.body if k.tag != w('sectPr')]
     tx = [ptext(k).strip() if k.tag == w('p') else '' for k in kids]
     i_vst = tx.index('встановила:')
-    i_vyr = tx.index('вирішила:')
+    i_vyr = next(i for i, t in enumerate(tx) if t in ('вирішила:', 'ухвалила:'))
     head = kids[:i_vst + 2]
     tail = kids[i_vyr - 1:]
     for el in head:
@@ -863,12 +975,18 @@ def cmd_template(a):
         if el.tag == w('p'):
             clean_para(el)
         t = ptext(el).strip() if el.tag == w('p') else ''
-        if state == 'before' and t.startswith(('притягнути', 'відмовити', 'Притягнути', '1.')):
+        if state == 'before' and t.startswith(('притягнути', 'відмовити', 'Притягнути', 'відкрити', '1.')):
             set_para_text(el, '{{OPERATIVE}}'); out_tail.append(el); state = 'operative'
-        elif state == 'operative' and not t.startswith('Рішення Третьої'):
+        elif state == 'operative' and not t.startswith(('Рішення Третьої', 'Ухвала ')):
             continue                                              # інші пункти резолютивної частини
-        elif t.startswith('Рішення Третьої'):
+        elif t.startswith(('Рішення Третьої', 'Ухвала ')):
+            lead_tab = ptext(el).startswith('\t')
             set_para_text(el, '{{APPEAL}}'); out_tail.append(el); state = 'after'
+            if lead_tab:                                          # «\tУхвала оскарженню не підлягає.»
+                r0 = el.find(w('r')); rt = etree.Element(w('r'))
+                if r0.find(w('rPr')) is not None:
+                    rt.append(copy.deepcopy(r0.find(w('rPr'))))
+                etree.SubElement(rt, w('tab')); r0.addprevious(rt)
         elif re.search(r'[А-ЯҐЄІЇ’]{3,}$', t) and not t.startswith(('Головуючий', 'Члени')):
             sig_seen += 1
             key = {1: 'CHAIR', 2: 'MEMBER1'}.get(sig_seen, 'MEMBER')
@@ -877,7 +995,16 @@ def cmd_template(a):
             first_done = False
             for r in list(el.iter(w('r'))):
                 if tabs and r is tabs[-1].getparent():
-                    after_tab = True; continue
+                    after_tab = True
+                    seen, found = False, False                    # ім'я в тому самому run після табуляції
+                    for ch in list(r):
+                        if ch is tabs[-1]:
+                            seen = True
+                        elif seen and ch.tag == w('t'):
+                            r.remove(ch); found = True
+                    if found:
+                        tabs[-1].addnext(mk_t('{{%s}}' % key)); first_done = True
+                    continue
                 tt = r.find(w('t'))
                 if after_tab and tt is not None:
                     if not first_done:
@@ -910,7 +1037,8 @@ def main():
     sp = ap.add_subparsers(dest='cmd', required=True)
     e = sp.add_parser('extract'); e.add_argument('--in', dest='inp', required=True); e.add_argument('--out', required=True)
     b = sp.add_parser('build'); b.add_argument('--in', dest='inp', required=True); b.add_argument('--data', required=True)
-    b.add_argument('--out', required=True); b.add_argument('--template', default=DEFAULT_TEMPLATE)
+    b.add_argument('--out', required=True); b.add_argument('--template', default=None,
+                                                           help='типово — за kind: ' + ', '.join(f'{k}: {v}' for k, v in TEMPLATES.items()))
     c = sp.add_parser('check'); c.add_argument('--in', dest='inp', required=True); c.add_argument('--orig')
     t = sp.add_parser('template'); t.add_argument('--from', required=True); t.add_argument('--out', required=True)
     a = ap.parse_args()
