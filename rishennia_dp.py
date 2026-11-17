@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """Проєкт рішення Дисциплінарної палати ВРП на основі висновку дисциплінарного інспектора
-за результатами підготовки дисциплінарної справи до розгляду. Версія 1.0 (16.11.2026).
+за результатами підготовки дисциплінарної справи до розгляду. Версія 1.1 (17.11.2026).
 Автор: В'ячеслав Плескач. Правила — скіл «proiekt-rishennia-dp»; довідка зі зразками — «Інструкція_рішення_ДП.md» у проєкті «СДІ».
 
   python3 rishennia_dp.py extract --in ВИСНОВОК.docx --out vysnovok.md
@@ -291,12 +291,45 @@ def first_run(p):
     return None
 
 
-def tracked_insert_para(after_p, text, like_p, tr):
+def unnumber(ppr, tr=None):
+    """Прибирає автонумерацію з pPr і ставить звичайний абзацний відступ 1,25 см.
+    Для наявного абзацу (tr задано) зміна фіксується як правка форматування (w:pPrChange)."""
+    if ppr.find(w('numPr')) is None:
+        return
+    if tr is not None:
+        old = etree.Element(w('pPr'))
+        for c in ppr:
+            if c.tag not in (w('rPr'), w('sectPr'), w('pPrChange')):
+                old.append(copy.deepcopy(c))
+    ppr.remove(ppr.find(w('numPr')))
+    ind = ppr.find(w('ind'))
+    if ind is None:
+        ind = etree.Element(w('ind'))
+        after_ind = [w(t) for t in ('contextualSpacing', 'mirrorIndents', 'suppressOverlap', 'jc', 'textDirection',
+                                    'textAlignment', 'textboxTightWrap', 'outlineLvl', 'divId', 'cnfStyle',
+                                    'rPr', 'sectPr', 'pPrChange')]
+        anchor = next((c for c in ppr if c.tag in after_ind), None)
+        if anchor is not None:
+            anchor.addprevious(ind)
+        else:
+            ppr.append(ind)
+    for k in list(ind.attrib):
+        del ind.attrib[k]
+    ind.set(w('left'), '0'); ind.set(w('firstLine'), '709')
+    if tr is not None:
+        ch = tr.mark('pPrChange')
+        ch.append(old)
+        ppr.append(ch)                      # pPrChange — останній дочірній елемент pPr
+
+
+def tracked_insert_para(after_p, text, like_p, tr, plain=False):
     np_ = etree.Element(w('p'))
     ppr = like_p.find(w('pPr'))
     ppr = copy.deepcopy(ppr) if ppr is not None else etree.Element(w('pPr'))
     for x in ppr.findall(w('sectPr')):
         ppr.remove(x)
+    if plain:                               # «Керуючись…» — без номера пункту
+        unnumber(ppr)
     rpr = ppr.find(w('rPr'))
     if rpr is None:
         rpr = etree.SubElement(ppr, w('rPr'))
@@ -637,6 +670,8 @@ def cmd_build(a):
     if loc['propose'] is not None:
         pp = P[loc['propose']]
         tracked_replace(pp, ptext(pp), ker, tr, whole=True)
+        if pp.find(w('pPr')) is not None:
+            unnumber(pp.find(w('pPr')), tr)
         for i in loc['propose_items']:
             if T[i]:
                 tracked_delete_para(P[i], tr)
@@ -644,7 +679,7 @@ def cmd_build(a):
                       f'пункти пропозиції ({len(loc["propose_items"])}) вилучено правками')
         last_p = P[loc['last']]
     else:
-        last_p = tracked_insert_para(P[loc['last']], ker, P[loc['last']], tr)
+        last_p = tracked_insert_para(P[loc['last']], ker, P[loc['last']], tr, plain=True)
         report.append(f'абзац «{ker[:30]}…» додано правкою після p{loc["last"]}')
 
     for e in sorted(inserts, key=lambda e: -e['after']):
@@ -809,6 +844,10 @@ def cmd_template(a):
     for el in head:
         for p in el.iter(w('p')):
             clean_para(p)
+            if p.find(f'.//{w("drawing")}') is not None:      # абзац з гербом: лише зображення,
+                for r in list(p.iter(w('r'))):                    # залишки тексту бланка прибрати
+                    if r.find(f'.//{w("drawing")}') is None and r.find(w('t')) is not None:
+                        r.getparent().remove(r)
             t = ptext(p).strip()
             if re.match(r'^_*\s*\S*\s*\d{4} року$', t) or re.match(r'^\d{1,2} \S+ \d{4} року$', t) or re.match(r'^_+ \S+ \d{4} року$', t):
                 set_para_text(p, '{{DATE}}')
