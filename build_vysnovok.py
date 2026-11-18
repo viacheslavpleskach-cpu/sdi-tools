@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Збирає DOCX висновку за результатами попередньої перевірки дисциплінарної скарги.
 
-Версія 1.1 (14.11.2026): автор у властивостях документа — «В'ячеслав Плескач» (dc:creator і cp:lastModifiedBy),
+Версія 1.2 (18.11.2026): кожен фрагмент «[ПОТРЕБУЄ ДОЗАПОВНЕННЯ…]» (і в тексті, і в таблиці, і у виносках)
+виділяється жовтим маркером (w:highlight yellow), щоб інспектор одразу бачив прогалини.
+1.1 (14.11.2026): автор у властивостях документа — «В'ячеслав Плескач» (dc:creator і cp:lastModifiedBy),
 незалежно від шаблону.
 
 Використання:
@@ -79,6 +81,33 @@ def rpr_with(rpr, italic=None, bold=None):
     else:
         inner = add + inner
     return '<w:rPr>' + inner + '</w:rPr>'
+
+
+GAP = re.compile(r'\[ПОТРЕБУЄ ДОЗАПОВНЕННЯ[^\]]*\]')
+RUN = re.compile(r'<w:r>(<w:rPr>.*?</w:rPr>)?<w:t(?: xml:space="preserve")?>([^<]*)</w:t></w:r>', re.S)
+
+
+def highlight_gaps(xml):
+    """Розбиває прогони з «[ПОТРЕБУЄ ДОЗАПОВНЕННЯ…]» і виділяє ці фрагменти жовтим маркером."""
+    def one(m):
+        rpr, text = m.group(1) or '<w:rPr></w:rPr>', m.group(2)
+        if 'ПОТРЕБУЄ ДОЗАПОВНЕННЯ' not in text:
+            return m.group(0)
+        hl = re.sub(r'<w:highlight [^>]*/>', '', rpr)
+        # порядок у w:rPr за схемою: highlight — перед u, effect, bdr, shd, fitText, vertAlign, rtl, cs, em, lang …
+        m2 = re.search(r'<w:(?:u|effect|bdr|shd|fitText|vertAlign|rtl|cs|em|lang|eastAsianLayout|specVanish|oMath)[ >/]', hl)
+        cut = m2.start() if m2 else hl.rindex('</w:rPr>')
+        hl = hl[:cut] + '<w:highlight w:val="yellow"/>' + hl[cut:]
+        out, pos = [], 0
+        for g in GAP.finditer(text):
+            if g.start() > pos:
+                out.append(f'<w:r>{rpr}<w:t xml:space="preserve">{text[pos:g.start()]}</w:t></w:r>')
+            out.append(f'<w:r>{hl}<w:t xml:space="preserve">{g.group(0)}</w:t></w:r>')
+            pos = g.end()
+        if pos < len(text):
+            out.append(f'<w:r>{rpr}<w:t xml:space="preserve">{text[pos:]}</w:t></w:r>')
+        return ''.join(out)
+    return RUN.sub(one, xml)
 
 
 def set_author(core):
@@ -286,6 +315,9 @@ class Doc:
             self.files['docProps/core.xml'] = set_author(self.files['docProps/core.xml'].decode('utf8')).encode('utf8')
 
     def save(self, path):
+        for n in ('word/document.xml', 'word/footnotes.xml'):
+            if n in self.files:
+                self.files[n] = highlight_gaps(self.files[n].decode('utf8')).encode('utf8')
         with zipfile.ZipFile(path, 'w', zipfile.ZIP_DEFLATED) as z:
             for n in self.z.namelist():
                 z.writestr(n, self.files[n])
