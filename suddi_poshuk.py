@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Пошук судді у «Списку суддів» ВККСУ (суд призначення, стать, досьє) і перевірка статусу судді.
 
-Автор: В'ячеслав Плескач. Версія 1.3 (17.11.2026): суддю шукає за будь-яким написанням ПІБ у скарзі (порядок слів,
+Автор: В'ячеслав Плескач. Версія 1.4 (18.11.2026): статус судді в ЄДРСР знаходить і за записом «В.І. Бевза»
+(ініціали перед прізвищем) — раніше такий суддя давав хибне «⚠ СТАТУС». 1.3 (17.11.2026): суддю шукає за будь-яким написанням ПІБ у скарзі (порядок слів,
 ініціали, відмінок, російське написання, описки, частина подвійного прізвища, лише прізвище) і за судом, якщо прізвище
 не збігається; рядки «ПІБ за списком ВККСУ» і «✓ / ⚠ ПІБ». 1.2 (14–15.11.2026): сумісність з edrsr_vybirka.py 3.0,
 статус, коли рішення знайдено лише в іншому суді.
@@ -117,6 +118,8 @@ def parse_query(query):
 def name_ok(pib, surname, rest):
     p = norm(pib).replace('.', '. ').split()
     p = [x.strip('.') for x in p if x.strip('.')]
+    if p and p[0] != surname and p[-1] == surname:
+        p = [p[-1]] + p[:-1]          # ЄДРСР інколи пише «В.І. Бевза» (ініціали перед прізвищем)
     if not p or p[0] != surname:
         return False
     for i, part in enumerate(rest[:2]):
@@ -300,7 +303,8 @@ def edrsr_last(surname, rest):
         con = duckdb.connect()
         rows = con.execute(f"""SELECT x.judge, coalesce(c.name, x.court_code), max(substr(x.adjudication_date,1,10)), count(*)
             FROM read_parquet('{d}/documents.parquet') x LEFT JOIN {ev.rd(d, 'courts.csv')} c ON c.court_code = x.court_code
-            WHERE lower(x.judge) LIKE ? GROUP BY 1, 2""", [surname.replace("'", "_") + ' %']).fetchall()
+            WHERE lower(x.judge) LIKE ? OR lower(x.judge) LIKE ? GROUP BY 1, 2""",
+            [surname.replace("'", "_") + ' %', '% ' + surname.replace("'", "_")]).fetchall()
         out = [r for r in rows if name_ok(r[0], surname, rest)]
         if out:
             break
