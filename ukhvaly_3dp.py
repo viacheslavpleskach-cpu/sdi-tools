@@ -465,7 +465,7 @@ def cmd_build(a):
             ph[m.group(1)] = p
     # шапка
     set_text(ph['DATE'], '  ' + data['date'])
-    set_text(ph['NUMBER'], data.get('number') or '№ ____/3дп/15-26')
+    set_text(ph['NUMBER'], data.get('number') or '№ ____/3дп/15-%02d' % (__import__('datetime').date.today().year % 100))
     title_p = ph['TITLE']
     lines = TITLES[kind]
     set_text(title_p, lines[0])

@@ -2,7 +2,7 @@
 """Проєкт рішення Дисциплінарної палати ВРП на основі висновку дисциплінарного інспектора
 за результатами підготовки дисциплінарної справи до розгляду, а також проєкт ухвали про відкриття
 дисциплінарної справи на основі висновку за результатами попередньої перевірки (kind "vidkryttia").
-Версія 1.2 (17.11.2026).
+Версія 1.3 (20.11.2026): дата й номер за замовчуванням — з поточним роком, а не жорстко 2026.
 Автор: В'ячеслав Плескач. Правила — скіл «proiekt-rishennia-dp»; довідка зі зразками — «Інструкція_рішення_ДП.md» у проєкті «СДІ».
 
   python3 rishennia_dp.py extract --in ВИСНОВОК.docx --out vysnovok.md
@@ -879,8 +879,9 @@ def cmd_build(a):
     rid = add_media(pkg, media)
     head = [copy.deepcopy(x) for x in head_t]
     for el in head:
-        fill(el, {'DATE': data.get('date', '___ ________ 2026 року'),
-                  'NUMBER': data.get('number', '№ _______/3дп/15-26'),
+        _y = datetime.date.today().year
+        fill(el, {'DATE': data.get('date', f'___ ________ {_y} року'),
+                  'NUMBER': data.get('number', f'№ _______/3дп/15-{_y % 100:02d}'),
                   'TITLE': data['title'], 'INTRO': data['intro']})
         for blip in el.iter('{http://schemas.openxmlformats.org/drawingml/2006/main}blip'):
             old = blip.get('{%s}embed' % R_NS)
