@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """Збирає DOCX висновку за результатами попередньої перевірки дисциплінарної скарги.
 
+Версія 1.3 (20.11.2026): вкладений перелік «1) …; 2) …» (рядки блоку, що починаються з «- ») — для розділу I,
+коли інспектор того самого дня надіслав кілька запитів (правило від 20.11.2026, зразок «Смик витяг»):
+нумерований пункт «[дата] дисциплінарний інспектор … надіслав наступні запити:», під ним — підпункти
+без наскрізного номера, нумерація «1)» починається заново в кожному переліку.
 Версія 1.2 (18.11.2026): кожен фрагмент «[ПОТРЕБУЄ ДОЗАПОВНЕННЯ…]» (і в тексті, і в таблиці, і у виносках)
 виділяється жовтим маркером (w:highlight yellow), щоб інспектор одразу бачив прогалини.
 1.1 (14.11.2026): автор у властивостях документа — «В'ячеслав Плескач» (dc:creator і cp:lastModifiedBy),
@@ -29,6 +33,8 @@
     > «Текст цитати...                   -> цитата: курсив, відступ, без номера
     звичайний абзац                      -> нумерований пункт (наскрізна автонумерація Word)
     =текст                               -> абзац без номера (звичайний відступ)
+    - перший запит;                      -> блок, усі рядки якого починаються з «- », — вкладений перелік
+    - другий запит.                         «1) …», «2) …» (нумерація заново в кожному блоці)
 Усередині абзацу:
     *курсив*, **жирний**, [^текст виноски] -> виноска внизу сторінки
 """
@@ -218,6 +224,32 @@ class Doc:
         ppr = ppr.replace('<w:spacing', '<w:ind w:firstLine="709"/><w:spacing', 1)
         return f'<w:p>{ppr}{self.runs(text, first_rpr(self.p_num))}</w:p>'
 
+    def sublist(self, items):
+        """Вкладений перелік «1)» з окремою нумерацією для кожного блоку (запити одного дня)."""
+        n = self.files['word/numbering.xml'].decode('utf8')
+        if not hasattr(self, 'abs_sub'):
+            ids = [int(x) for x in re.findall(r'w:abstractNumId="(\d+)"', n)]
+            self.abs_sub = max(ids) + 1 if ids else 0
+            rpr = re.sub(r'<w:b/>|<w:bCs/>|<w:i/>|<w:iCs/>', '', first_rpr(self.p_num))
+            absn = (f'<w:abstractNum w:abstractNumId="{self.abs_sub}"><w:multiLevelType w:val="hybridMultilevel"/>'
+                    f'<w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1)"/>'
+                    f'<w:lvlJc w:val="left"/><w:pPr><w:ind w:left="709" w:firstLine="284"/></w:pPr>{rpr}</w:lvl>'
+                    f'</w:abstractNum>')
+            # abstractNum мають стояти перед першим w:num
+            k = n.find('<w:num ')
+            n = n[:k] + absn + n[k:] if k > 0 else n.replace('</w:numbering>', absn + '</w:numbering>')
+        nums = [int(x) for x in re.findall(r'<w:num w:numId="(\d+)"', n)]
+        nid = max(nums) + 1 if nums else 1
+        n = n.replace('</w:numbering>', f'<w:num w:numId="{nid}"><w:abstractNumId w:val="{self.abs_sub}"/>'
+                      f'<w:lvlOverride w:ilvl="0"><w:startOverride w:val="1"/></w:lvlOverride></w:num></w:numbering>')
+        self.files['word/numbering.xml'] = n.encode('utf8')
+        ppr = ppr_of(self.p_num)
+        ppr = re.sub(r'<w:numId w:val="\d+"/>', f'<w:numId w:val="{nid}"/>', ppr)
+        ppr = re.sub(r'<w:ind [^>]*/>', '<w:ind w:left="709" w:firstLine="284"/>', ppr)
+        ppr = re.sub(r'<w:spacing w:before="\d+"', '<w:spacing w:before="60"', ppr)
+        rpr = first_rpr(self.p_num)
+        return ''.join(f'<w:p>{ppr}{self.runs(t, rpr)}</w:p>' for t in items)
+
     # --- таблиці ---
     @staticmethod
     def fill_cell(tc, lines):
@@ -291,7 +323,11 @@ class Doc:
         blocks = [b.strip() for b in re.split(r'\n\s*\n', '\n'.join(body_lines)) if b.strip()]
         out = []
         for b in blocks:
-            b = ' '.join(x.strip() for x in b.splitlines())
+            lines = [x.strip() for x in b.splitlines() if x.strip()]
+            if lines and all(x.startswith('- ') for x in lines):
+                out.append(self.sublist([x[2:].strip() for x in lines]))
+                continue
+            b = ' '.join(lines)
             if b.startswith('## '):
                 if self.p_sub:
                     out.append(self.para(self.p_sub, b[3:]))
