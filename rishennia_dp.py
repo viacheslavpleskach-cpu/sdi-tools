@@ -3,6 +3,9 @@
 за результатами підготовки дисциплінарної справи до розгляду, а також проєкт ухвали про відкриття
 дисциплінарної справи на основі висновку за результатами попередньої перевірки (kind "vidkryttia").
 Версія 1.3 (20.11.2026): дата й номер за замовчуванням — з поточним роком, а не жорстко 2026.
+Версія 1.4 (20.11.2026): самопосилання з малої літери («у пункті 131 цього висновку», «у цьому висновку», «додаток 1 до висновку»)
+  замінюються правками, крім цитат і висновків інших органів; run з нерозривним дефісом / табуляцією перед текстом
+  розрізається, тож правка в такому абзаці більше не падає з «межа правки всередині поля».
 Автор: В'ячеслав Плескач. Правила — скіл «proiekt-rishennia-dp»; довідка зі зразками — «Інструкція_рішення_ДП.md» у проєкті «СДІ».
 
   python3 rishennia_dp.py extract --in ВИСНОВОК.docx --out vysnovok.md
@@ -61,6 +64,27 @@ AUTO = {'rishennia': [('цього Висновку', 'цього рішення
                       ('до Висновку', 'до рішення'), ('цей Висновок', 'це рішення')],
         'ukhvala': [('цього Висновку', 'цієї ухвали'), ('цьому Висновку', 'цій ухвалі'),
                     ('до Висновку', 'до ухвали'), ('цей Висновок', 'ця ухвала')]}
+# те саме з малої літери (1.4): не в цитатах «…» і не про висновки інших органів («цього висновку органу опіки»)
+LC_NOT = r'(?!\s+(?:орган\w*|ВККС|Консультативн\w*|Венеційськ\w*|експерт\w*|КРЄС|ЄСПЛ|№|Ради|ради|комісі\w*|служб\w*|суду|Суду|інспектор\w*|прокурор\w*|щодо))'
+REF = r'\b(?:пункт|підпункт|розділ|абзац|таблиц|додат|виноск)\w*\s+[^.;«»]{0,40}?'
+LC_RX = {'цього': re.compile(REF + r'\bцього висновку\b' + LC_NOT),
+         'цьому': re.compile(r'(?<!\w)[УуВв] цьому висновку\b' + LC_NOT),
+         'додаток': re.compile(r'\b[Дд]одат\w*\s+(?:№\s*)?\d+(?:\s*[,–-]\s*\d+)*\s+до висновку\b')}
+# «цей висновок» з малої не замінюється: зазвичай це висновок суду / ЄСПЛ («Зробивши цей висновок, Суд…»)
+AUTO_LC = {'rishennia': [(LC_RX['цього'], 'цього висновку', 'цього рішення'),
+                         (LC_RX['цьому'], 'цьому висновку', 'цьому рішенні'),
+                         (LC_RX['додаток'], 'до висновку', 'до рішення')],
+           'ukhvala': [(LC_RX['цього'], 'цього висновку', 'цієї ухвали'),
+                       (LC_RX['цьому'], 'цьому висновку', 'цій ухвалі'),
+                       (LC_RX['додаток'], 'до висновку', 'до ухвали')]}
+
+
+def in_quote(txt, pos):
+    """Позиція всередині цитати «…» (незакрита «  перед pos)."""
+    head = txt[:pos]
+    return head.count('«') > head.count('»')
+
+
 # відомості про призначення / обрання судді наприкінці висновку попередньої перевірки
 APPOINT = re.compile(r'(Указом Президента України|Постановою Верховної Ради України|[Рр]ішенням Вищої ради правосуддя)'
                      r'.{0,250}?\b(призначен|обран|переведен)', re.S)
@@ -101,6 +125,35 @@ def is_simple(r):
     return r.tag == w('r') and len(kids) == 1 and kids[0].tag == w('t')
 
 
+GLYPHS = {w('noBreakHyphen'), w('softHyphen'), w('tab')}
+
+
+def is_glyph_run(r):
+    """run лише з нерозривного дефіса / м'якого переносу / табуляції — його можна вилучати правкою."""
+    kids = [k for k in r if k.tag not in SIMPLE_SKIP]
+    return r.tag == w('r') and bool(kids) and all(k.tag in GLYPHS for k in kids)
+
+
+def split_mixed_runs(p):
+    """run на кшталт <noBreakHyphen/><t>текст</t> розрізає на окремі runs (по одному елементу),
+    щоб текстова частина стала простим run і правку можна було поставити всередині неї (1.4)."""
+    for r in list(p.iter(w('r'))):
+        kids = [k for k in r if k.tag not in SIMPLE_SKIP]
+        if len(kids) < 2 or not all(k.tag in GLYPHS or k.tag == w('t') for k in kids):
+            continue
+        rpr = r.find(w('rPr'))
+        prev = r
+        for k in kids:
+            nr = etree.Element(w('r'))
+            for a, v in r.attrib.items():
+                nr.set(a, v)
+            if rpr is not None:
+                nr.append(copy.deepcopy(rpr))
+            nr.append(k)
+            prev.addnext(nr); prev = nr
+        r.getparent().remove(r)
+
+
 def bar_text(el):
     out = []
     for x in el.iter():
@@ -118,6 +171,7 @@ def bar_text(el):
 def clean_para(p):
     for x in list(p.iter(w('proofErr'), w('lastRenderedPageBreak'))):
         x.getparent().remove(x)
+    split_mixed_runs(p)
     # злиття сусідніх простих runs з однаковим rPr
     prev = None
     for ch in list(p):
@@ -206,7 +260,7 @@ def apply_hunk(p, start, end, ins_text, tr):
         a, b = acc, acc + len(txt)
         acc = b
         if start < end and a >= start and b <= end and txt:
-            if kind != 'run':
+            if kind != 'run' and not is_glyph_run(el):
                 raise ValueError(f'фрагмент для вилучення зачіпає поле/виноску/правку: {txt!r}')
             dels.append(el)
         elif start < end and a < end and b > start:
@@ -223,7 +277,9 @@ def apply_hunk(p, start, end, ins_text, tr):
         d = tr.mark('del')
         el.addprevious(d)
         d.append(el)
-        t = el.find(w('t')); t.tag = w('delText')
+        t = el.find(w('t'))
+        if t is not None:
+            t.tag = w('delText')
     if ins_text:
         ins = tr.mark('ins')
         r = etree.SubElement(ins, w('r'))
@@ -470,7 +526,7 @@ def locate(pkg):
     loc['propose'] = prop[-1] if prop else None
     dod = [i for i, t in enumerate(T[:end]) if re.match(r'^Додатки?\s*:', t)]
     loc['dodatky'] = dod[-1] if dod and (loc['propose'] is None or dod[-1] > loc['propose']) else None
-    loc['appendix'] = [i for i, t in enumerate(T) if re.match(r'^Додаток\s*№?\s*\d+\s+до\s+Висновку', t)]
+    loc['appendix'] = [i for i, t in enumerate(T) if re.match(r'^Додаток\s*№?\s*\d+\s+до\s+[Вв]исновку', t)]
     # останній абзац мотивувальної частини
     stop = min(x for x in (loc['dodatky'], loc['sig'], len(P)) if x is not None)
     last = stop - 1
@@ -493,6 +549,9 @@ def locate(pkg):
 HINTS = [
     ('Самопосилання «Висновок» (крім «цього Висновку», «до Висновку» — їх скрипт замінює сам)',
      re.compile(r'(?<!цього )(?<!до )\bВисновк\w*')),
+    ('Самопосилання з малої «висновок» (скрипт сам замінює «пункт N цього висновку», «у цьому висновку», «додаток N до висновку», '
+     'крім цитат «…» і висновків інших органів; решту — вручну)',
+     re.compile(r'\b(?:цього|цьому|цей|даного|даному|цим)\s+висновк\w*|[Дд]одат\w*\s+(?:№\s*)?\d+\s+до\s+висновку')),
     ('«Ознаки» порушення / проступку (перевести у ствердну форму, крім цитат ухвал і фактичних описів)',
      re.compile(r'ознак\w*', re.I)),
     ('Перша особа інспектора', re.compile(r'\b(вважаю|пропоную|доходжу|на мою думку|вбачаю|переконаний|зазначу|наголошу|'
@@ -507,6 +566,9 @@ HINTS = [
 HINTS_VIDKRYTTIA = [
     ('Самопосилання «Висновок» (крім «цього Висновку», «до Висновку» — їх скрипт замінює сам)',
      re.compile(r'(?<!цього )(?<!до )\bВисновк\w*')),
+    ('Самопосилання з малої «висновок» (скрипт сам замінює «пункт N цього висновку», «у цьому висновку», «додаток N до висновку», '
+     'крім цитат «…» і висновків інших органів; решту — вручну)',
+     re.compile(r'\b(?:цього|цьому|цей|даного|даному|цим)\s+висновк\w*|[Дд]одат\w*\s+(?:№\s*)?\d+\s+до\s+висновку')),
     ('Ствердні висновки про дії судді (кандидати на гіпотезу: «могла не навести», «міг бути», «може не відповідати»)',
      re.compile(r'\b(вочевидь|очевидно|фактично|безумовно|свідчить|підтверджується|не навів|не навела|не врахував|'
                 r'не врахувала|не надав|не надала|порушив|порушила|допустив|допустила|стало|призвело)\b', re.I)),
@@ -711,7 +773,7 @@ def cmd_build(a):
 
     # 1. Автоматичні правки: самопосилання «Висновок» → «рішення» / «ухвала» (у режимі правок)
     auto = AUTO['ukhvala' if vid else 'rishennia']
-    nauto = 0
+    nauto, auto_lc = 0, []
     for i in body_range:
         for old, new in auto:
             k = 1
@@ -724,6 +786,21 @@ def cmd_build(a):
                     break
                 k += 1
                 if k > 50:
+                    break
+        for rx, old, new in AUTO_LC['ukhvala' if vid else 'rishennia']:
+            for _ in range(50):
+                txt = ptext(P[i]).replace('\xa0', ' ')
+                m = next((m for m in rx.finditer(txt) if not in_quote(txt, m.start())), None)
+                if m is None:
+                    break
+                pos = m.start() + m.group(0).rfind(old)
+                n = txt[:pos].count(old) + 1
+                try:
+                    tracked_replace(P[i], old, new, tr, n=n, strict=False)
+                    nauto += 1
+                    auto_lc.append(f'p{i}: «{old}» → «{new}»')
+                except ValueError as e:
+                    errors.append(f'auto p{i}: {e}')
                     break
 
     # 2. Правки з data.json (у режимі правок). Вставки абзаців — наприкінці, з кінця.
@@ -868,7 +945,7 @@ def cmd_build(a):
         anchor.addnext(el); anchor = el
     for i in loc['appendix']:
         p = P[i]
-        set_para_text(p, re.sub(r'до\s+Висновку', 'до ухвали' if vid else 'до рішення', ptext(p)))
+        set_para_text(p, re.sub(r'до\s+[Вв]исновку', 'до ухвали' if vid else 'до рішення', ptext(p)))
 
     # 6. Шапка (напряму): усе до «І. ПРОЦЕДУРНІ ПИТАННЯ» замінюється шапкою шаблону
     proc_top = top_of(P[loc['proc']])
@@ -899,6 +976,8 @@ def cmd_build(a):
     print(f'- технічних виправлень (напряму): {nfix}')
     print(f'- вид документа: {"ухвала про відкриття дисциплінарної справи" if vid else "рішення"}; шаблон: {os.path.basename(template)}')
     print(f'- автоматичних замін «Висновок → {"ухвала" if vid else "рішення"}» (правками): {nauto}')
+    if auto_lc:
+        print('  з них з малої літери (перевірити, що це самопосилання): ' + '; '.join(auto_lc))
     print(f'- правок з data.json: {len(edits) - len([x for x in errors if x.startswith(("edit", "insert"))])} з {len(edits)}')
     print(f'- елементів кінця висновку вилучено: {removed}; додатків: {len(loc["appendix"])}')
     for r in report:
