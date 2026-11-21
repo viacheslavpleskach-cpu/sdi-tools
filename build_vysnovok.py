@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Збирає DOCX висновку за результатами попередньої перевірки дисциплінарної скарги.
 
+Версія 1.4 (21.11.2026): заголовки розділів («# ») і підзаголовки («## ») не відриваються від наступного
+абзацу внизу сторінки (w:keepNext).
 Версія 1.3 (20.11.2026): вкладений перелік «1) …; 2) …» (рядки блоку, що починаються з «- ») — для розділу I,
 коли інспектор того самого дня надіслав кілька запитів (правило від 20.11.2026, зразок «Смик витяг»):
 нумерований пункт «[дата] дисциплінарний інспектор … надіслав наступні запити:», під ним — підпункти
@@ -124,6 +126,16 @@ def set_author(core):
         else:
             core = core.replace('</cp:coreProperties>', f'<{tag}>{a}</{tag}></cp:coreProperties>')
     return core
+
+
+def keep_next(p):
+    """Заголовок не лишається внизу сторінки окремо від тексту (w:keepNext)."""
+    if '<w:keepNext/>' in p:
+        return p
+    if '<w:pPr>' in p:
+        m = re.search(r'<w:pPr>(<w:pStyle [^>]*/>)?', p)
+        return p[:m.end()] + '<w:keepNext/>' + p[m.end():]
+    return p.replace('<w:p>', '<w:p><w:pPr><w:keepNext/></w:pPr>', 1)
 
 
 class Doc:
@@ -330,13 +342,13 @@ class Doc:
             b = ' '.join(lines)
             if b.startswith('## '):
                 if self.p_sub:
-                    out.append(self.para(self.p_sub, b[3:]))
+                    out.append(keep_next(self.para(self.p_sub, b[3:])))
                 else:  # у шаблоні немає підзаголовка — жирний курсив без номера
                     ppr = re.sub(r'<w:numPr>.*?</w:numPr>', '', ppr_of(self.p_num), flags=re.S)
                     rp = rpr_with(first_rpr(self.p_num), italic=True, bold=True)
-                    out.append(f'<w:p>{ppr}<w:r>{rp}<w:t xml:space="preserve">{esc(b[3:])}</w:t></w:r></w:p>')
+                    out.append(keep_next(f'<w:p>{ppr}<w:r>{rp}<w:t xml:space="preserve">{esc(b[3:])}</w:t></w:r></w:p>'))
             elif b.startswith('# '):
-                out.append(self.para(self.p_head, b[2:]))
+                out.append(keep_next(self.para(self.p_head, b[2:])))
             elif b.startswith('> '):
                 out.append(self.quote(b[2:]))
             elif b.startswith('='):
