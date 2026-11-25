@@ -1,6 +1,12 @@
 #!/usr/bin/env python3
 """Збирає DOCX висновку за результатами попередньої перевірки дисциплінарної скарги.
 
+Версія 1.7 (26.11.2026): кожен рядок «> » — окремий абзац цитати (раніше рядки одного блоку зливалися в один абзац,
+і пропуск «….» між фрагментами виходив окремим абзацом лише через порожні рядки); цитата може йти одразу після
+вступного рядка, без порожнього рядка між ними; абзаци однієї цитати йдуть щільно, а після останнього — звичайний
+інтервал до наступного пункту (раніше в основному шаблоні інтервалу після цитати не було, а в шаблоні «відкриття»
+інтервали стояли між усіма абзацами цитати); якщо шаблоном узято готовий висновок із виносками, його виноски
+вилучаються разом з текстом (раніше лишалися у файлі під тими самими номерами).
 Версія 1.6 (26.11.2026): назви розділів («# ») завжди великими літерами, як у висновку з пропозицією відкрити
 справу; цитата («> ») — на рівні тексту пункту (лівий відступ цитати дорівнює відступу пункту шаблону, типово
 1 см; раніше завжди 0,7 см); у шаблонах відступ від номера пункту до тексту — 1 см.
@@ -42,7 +48,9 @@ w:ind); перелік «- » одразу після вступного ряд�
 Тіло (абзаци розділяються порожнім рядком):
     # І. Процедурні питання              -> заголовок розділу (жирний; у документі — великими літерами)
     ## Загальні принципи                 -> підзаголовок (жирний курсив, підкреслений)
-    > «Текст цитати...                   -> цитата: курсив, без номера, на рівні тексту пункту
+    > «Текст цитати...                   -> цитата: курсив, без номера, на рівні тексту пункту; кожен рядок
+    > ….                                    «> » — окремий абзац цитати (пропуск «….» між фрагментами — своїм рядком);
+    > …продовження цитати».                 рядок без «>» одразу після рядка цитати — продовження того самого абзацу
     звичайний абзац                      -> нумерований пункт (наскрізна автонумерація Word)
     =текст                               -> абзац без номера (звичайний відступ)
     - перший запит;                      -> рядки, що починаються з «- », — вкладений перелік «1) …», «2) …»
@@ -153,6 +161,22 @@ def set_ind(ppr, ind):
     return ppr[:k] + ind + ppr[k:]
 
 
+def set_ctx(ppr, off):
+    """«Не додавати інтервал між абзацами одного стилю» (успадковується від стилю «Абзац списку»): off=True —
+    вимкнути в цьому абзаці (w:contextualSpacing w:val="0"), off=False — лишити як у стилі. У висновках інспектора
+    абзаци цитати йдуть щільно, а останній має звичайний інтервал до наступного пункту."""
+    ppr = re.sub(r'<w:contextualSpacing(?: w:val="\w+")?/>', '', ppr)
+    if not off:
+        return ppr
+    el = '<w:contextualSpacing w:val="0"/>'
+    m = re.search(r'<w:ind [^>]*/>', ppr) or re.search(r'<w:spacing [^>]*/>', ppr)
+    if m:
+        return ppr[:m.end()] + el + ppr[m.end():]
+    m = re.search(r'<w:(?:jc|rPr)[ >/]', ppr)
+    k = m.start() if m else ppr.rindex('</w:pPr>')
+    return ppr[:k] + el + ppr[k:]
+
+
 def highlight_gaps(xml):
     """Розбиває прогони з «[ПОТРЕБУЄ ДОЗАПОВНЕННЯ…]» і виділяє ці фрагменти жовтим маркером."""
     def one(m):
@@ -212,8 +236,21 @@ class Doc:
         if 'word/footnotes.xml' not in self.files:
             sys.exit('У шаблоні немає word/footnotes.xml: візьміть шаблон із sdi-tools або висновок, у якому є хоча б одна виноска.')
         self.fn_xml = self.files['word/footnotes.xml'].decode('utf8')
-        self.fn_next = 1
         self._find_protos()
+        self._drop_old_footnotes()
+
+    def _drop_old_footnotes(self):
+        """Шаблоном може бути готовий висновок із виносками: його текст відкидається, тож і виноски до нього
+        вилучаються (інакше вони лишалися б у файлі під тими самими номерами, що й нові). Виноски, на які
+        посилаються шапка чи підпис, зберігаються; нові нумеруються після них."""
+        kept_src = ''.join(self.els[:self.i_h1] + self.els[self.i_post:])
+        keep = {int(x) for x in re.findall(r'<w:footnoteReference [^>]*w:id="(\d+)"', kept_src)}
+
+        def one(m):
+            n = int(m.group(1))
+            return m.group(0) if n <= 0 or n in keep else ''
+        self.fn_xml = re.sub(r'<w:footnote\b[^>]*\bw:id="(-?\d+)"[^>]*>.*?</w:footnote>', one, self.fn_xml, flags=re.S)
+        self.fn_next = max(keep, default=0) + 1
 
     def _find_protos(self):
         els = self.els
@@ -284,8 +321,8 @@ class Doc:
         rpr = first_rpr(proto)
         return f'<w:p>{ppr}{self.runs(text, rpr, italic)}</w:p>'
 
-    def quote(self, text):
-        ppr = set_ind(ppr_of(self.p_quote or self.p_num), self.quote_ind)
+    def quote(self, text, last=True):
+        ppr = set_ctx(set_ind(ppr_of(self.p_quote or self.p_num), self.quote_ind), off=last)
         rpr = rpr_with(first_rpr(self.p_num), italic=False, bold=False)
         lead = ''
         if text.startswith('«'):
@@ -418,26 +455,33 @@ class Doc:
         self.fill_date(meta['дата'][0] if meta['дата'] else None)
         self.fill_info(meta)
         raw = [b.strip() for b in re.split(r'\n\s*\n', '\n'.join(body_lines)) if b.strip()]
-        blocks = []                              # (рядки, це_перелік)
+        blocks = []                              # (рядки, вид): 'p' — абзац, 'li' — перелік, 'q' — абзац цитати
         for b in raw:
-            lines = [x.strip() for x in b.splitlines() if x.strip()]
-            if lines[0].startswith('> '):        # цитата: «> » може стояти в кожному рядку
-                blocks.append((['> ' + ' '.join(x[2:].strip() if x.startswith('> ') else x for x in lines)], False))
-                continue
-            for x in lines:                      # перелік «- » може йти одразу після рядка абзацу
-                li = x.startswith('- ')
-                if blocks and blocks[-1][2:] == (id(b),) and blocks[-1][1] == li:
-                    blocks[-1][0].append(x)
+            items = []
+            for x in (y.strip() for y in b.splitlines() if y.strip()):
+                if x.startswith('>'):            # кожен рядок «> » — окремий абзац цитати
+                    if x[1:].strip():
+                        items.append(['q', [x[1:].strip()]])
+                elif x.startswith('- '):         # рядки «- » поспіль — один вкладений перелік
+                    if items and items[-1][0] == 'li':
+                        items[-1][1].append(x)
+                    else:
+                        items.append(['li', [x]])
+                elif items and items[-1][0] in ('p', 'q'):   # продовження абзацу чи абзацу цитати
+                    items[-1][1][-1] += ' ' + x
                 else:
-                    blocks.append(([x], li, id(b)))
+                    items.append(['p', [x]])
+            blocks += [(lines, kind) for kind, lines in items]
         out = []
-        for blk in blocks:
-            lines = blk[0]
-            if blk[1]:
+        for n, (lines, kind) in enumerate(blocks):
+            if kind == 'li':
                 out.append(self.sublist([x[2:].strip() for x in lines]))
                 continue
-            b = ' '.join(lines)
-            if b.startswith('## '):
+            b = lines[0]
+            if kind == 'q':                      # останній абзац цитати — зі звичайним інтервалом до наступного пункту
+                last = n + 1 == len(blocks) or blocks[n + 1][1] != 'q'
+                out.append(self.quote(b, last))
+            elif b.startswith('## '):
                 if self.p_sub:
                     out.append(keep_next(self.para(self.p_sub, b[3:])))
                 else:  # у шаблоні немає підзаголовка — жирний курсив без номера
@@ -446,8 +490,6 @@ class Doc:
                     out.append(keep_next(f'<w:p>{ppr}<w:r>{rp}<w:t xml:space="preserve">{esc(b[3:])}</w:t></w:r></w:p>'))
             elif b.startswith('# '):
                 out.append(keep_next(self.para(self.p_head, upper_title(b[2:]))))
-            elif b.startswith('> '):
-                out.append(self.quote(b[2:]))
             elif b.startswith('='):
                 out.append(self.plain(b[1:].strip()))
             else:
