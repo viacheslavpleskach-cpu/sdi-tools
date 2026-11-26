@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 """Збирає DOCX висновку за результатами попередньої перевірки дисциплінарної скарги.
 
+Версія 1.9 (26.11.2026): керуючі символи (\x01, \x1f тощо — трапляються після копіювання з PDF) вилучаються з
+попередженням, а не дають пошкоджений DOCX; прогалина «[ПОТРЕБУЄ ДОЗАПОВНЕННЯ…]» із *курсивом* / **жирним** усередині
+виділяється жовтим, як і без них (розмітка всередині прогалини не застосовується); рядок шапки на кшталт «@e-mail:» —
+помилка невідомого ключа, а не пункт перед розділом I; текст перед першим заголовком «# » — попередження; шаблон без
+двох таблиць шапки, без «І. ПРОЦЕДУРНІ ПИТАННЯ» чи без підпису — зрозуміле повідомлення замість traceback.
 Версія 1.8 (26.11.2026): рядок «# » / «## » — завжди окремий заголовок: наступний рядок без порожнього рядка між ними
 більше не дописується до заголовка (раніше він ставав частиною назви розділу великими літерами); рядок без «- » одразу
 після пункту переліку — продовження цього пункту (раніше ставав окремим нумерованим пунктом і розривав перелік, а решта
@@ -122,6 +127,7 @@ RUN = re.compile(r'<w:r>(<w:rPr>(?:(?!</w:rPr>).)*</w:rPr>)?<w:t(?: xml:space="p
 MARK = re.compile(r'(?<![\w*])(\*\*|\*)(?=\S)([^*]+?)(?<=\S)\1(?![\w*])')
 MONTHS = ['січня', 'лютого', 'березня', 'квітня', 'травня', 'червня', 'липня', 'серпня', 'вересня', 'жовтня',
           'листопада', 'грудня']
+BAD_XML = re.compile(r'[\x00-\x08\x0b\x0c\x0e-\x1f\ufffe\uffff]')   # недопустимі в XML 1.0
 POINT_LEFT = 567                     # відступ від номера пункту до тексту, якщо в шаблоні його не задано: 1 см
 META_KEYS = ('скаржник', 'скарга', 'суддя', 'пропозиція', 'дата', 'акт')
 
@@ -263,6 +269,9 @@ class Doc:
         els = self.els
         idx = {}
         tables = [i for i, e in enumerate(els) if e.startswith('<w:tbl>')]
+        if len(tables) < 2:
+            sys.exit('Шаблон іншої верстки: потрібні дві таблиці шапки (дата і «Скаржник / Скарга / Пропозиція»). '
+                     'Візьміть Шаблон_висновку.docx або Шаблон_висновку_відкриття.docx із sdi-tools.')
         self.i_date, self.i_info = tables[0], tables[1]
         for i, e in enumerate(els):
             t = text_of(e).strip()
@@ -274,6 +283,9 @@ class Doc:
                 idx['h2'] = i
             if t.startswith('Дисциплінарний інспектор'):
                 idx['sign'] = i
+        for k, what in (('h1', 'заголовка «І. ПРОЦЕДУРНІ ПИТАННЯ»'), ('sign', 'підпису «Дисциплінарний інспектор…»')):
+            if k not in idx:
+                sys.exit(f'У шаблоні немає {what}: візьміть шаблон із sdi-tools.')
         self.i_h1 = idx['h1']
         self.p_head = els[idx['h1']]
         self.p_sub = els[idx['h2']] if 'h2' in idx else None
@@ -302,12 +314,16 @@ class Doc:
             if kind == 'fn':
                 out.append(self.footnote(part, base_rpr))
                 continue
-            pos = 0
-            for m in MARK.finditer(part):
-                emit(part[pos:m.start()], False, False)
-                emit(m.group(2), m.group(1) == '**', m.group(1) == '*')
-                pos = m.end()
-            emit(part[pos:], False, False)
+            for j, seg in enumerate(re.split(r'(\[ПОТРЕБУЄ ДОЗАПОВНЕННЯ[^\]]*\])', part)):
+                if j % 2:                    # прогалина — один прогін без розмітки, щоб її виділив highlight_gaps (1.9)
+                    emit(MARK.sub(lambda m: m.group(2), seg), False, False)
+                    continue
+                pos = 0
+                for m in MARK.finditer(seg):
+                    emit(seg[pos:m.start()], False, False)
+                    emit(m.group(2), m.group(1) == '**', m.group(1) == '*')
+                    pos = m.end()
+                emit(seg[pos:], False, False)
         return ''.join(out)
 
     def footnote(self, text, base_rpr):
@@ -445,8 +461,11 @@ class Doc:
     def build(self, md):
         meta = {'скаржник': [], 'скарга': [], 'суддя': [], 'пропозиція': [], 'дата': [], 'акт': []}
         body_lines, bad = [], []
-        for line in md.lstrip('\ufeff').splitlines():
-            m = re.match(r'\s*@\s*([^\W\d_]+)\s*:\s*(.*)$', line)
+        md = md.lstrip('\ufeff')
+        nbad = len(BAD_XML.findall(md))
+        md = BAD_XML.sub('', md)
+        for line in md.splitlines():
+            m = re.match(r'\s*@\s*([^\W\d_][\w-]*)\s*:\s*(.*)$', line)
             if m and m.group(1).lower() in meta:
                 meta[m.group(1).lower()].append(m.group(2).strip())
             elif m:
@@ -457,6 +476,8 @@ class Doc:
             sys.exit('Невідомі рядки шапки (допустимі: ' + ', '.join('@' + k for k in META_KEYS) + '):\n  ' + '\n  '.join(bad))
         self.warn = [f'у шапці немає «@{k}:» — клітинку таблиці залишено порожньою'
                      for k in ('скаржник', 'скарга', 'суддя', 'пропозиція') if not meta[k]]
+        if nbad:
+            self.warn.append(f'вилучено керуючих символів: {nbad} (недопустимі в DOCX; звірте текст поруч із ними)')
         if not meta['дата']:
             self.warn.append('у шапці немає «@дата:» — день і місяць залишено порожніми, рік поточний')
         self.fill_date(meta['дата'][0] if meta['дата'] else None)
@@ -481,6 +502,9 @@ class Doc:
                 else:
                     items.append(['p', [x]])
             blocks += [(lines, kind) for kind, lines in items]
+        if blocks and not blocks[0][0][0].startswith('# '):
+            self.warn.append('текст перед першим заголовком «# …» стоїть у документі перед розділом I: '
+                             + blocks[0][0][0][:60])
         out = []
         for n, (lines, kind) in enumerate(blocks):
             if kind == 'li':

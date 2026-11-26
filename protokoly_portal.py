@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Пошук протоколів автоматизованого розподілу прямо у відкритих даних (без покажчика на Диску).
 
-Автор: В'ячеслав Плескач. Версія 2.1 (25.11.2026): мітки полів усередині квадратних дужок («[Примітки: Наказ…]» у причині
+Автор: В'ячеслав Плескач. Версія 2.2 (26.11.2026): --from / --to / --around — РРРР-ММ-ДД або ДД.ММ.РРРР, як в інших скриптах (раніше
+ДД.ММ.РРРР давало traceback). Версія 2.1 (25.11.2026): мітки полів усередині квадратних дужок («[Примітки: Наказ…]» у причині
 виключення судді) більше не обривають перелік виключених суддів і не занижують excluded_count; номер справи порівнюється
 без пробілів, регістру й кінцевого суфікса (-к, -ц, -а), як в інших скриптах; відсутні в наборі дні й помилки
 завантаження друкуються і в результаті (stdout), а не лише в stderr; вивід понад 200 рядків позначається. 2.0 (21.11.2026): джерело — data.gov.ua і сайт ДСА, погодинні архіви,
@@ -299,6 +300,16 @@ def resources(src):
     return res, note
 
 
+def pdate(s, name):
+    """РРРР-ММ-ДД або ДД.ММ.РРРР → date (2.2)."""
+    for f in ('%Y-%m-%d', '%d.%m.%Y'):
+        try:
+            return dt.datetime.strptime(s.strip(), f).date()
+        except ValueError:
+            pass
+    sys.exit(f'{name}: не розпізнано дату «{s}» (потрібно РРРР-ММ-ДД або ДД.ММ.РРРР).')
+
+
 def match(x, a):
     if a.case and case_key(x.get('CAUSE_NUMBER', '')) not in a.case:
         return False
@@ -357,10 +368,10 @@ def main():
     if not (a.case or a.court or a.judge):
         sys.exit('Задайте --case, --court або --judge.')
     if a.around:
-        c = dt.date.fromisoformat(a.around)
+        c = pdate(a.around, '--around')
         d1, d2 = c - dt.timedelta(days=1), c + dt.timedelta(days=a.days)
     elif a.dfrom:
-        d1 = dt.date.fromisoformat(a.dfrom); d2 = dt.date.fromisoformat(a.dto or a.dfrom)
+        d1 = pdate(a.dfrom, '--from'); d2 = pdate(a.dto or a.dfrom, '--to')
     else:
         sys.exit('Задайте проміжок днів: --from/--to або --around.')
     if d2 < d1:

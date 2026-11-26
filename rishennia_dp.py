@@ -2,6 +2,11 @@
 """Проєкт рішення Дисциплінарної палати ВРП на основі висновку дисциплінарного інспектора
 за результатами підготовки дисциплінарної справи до розгляду, а також проєкт ухвали про відкриття
 дисциплінарної справи на основі висновку за результатами попередньої перевірки (kind "vidkryttia").
+Версія 1.7 (26.11.2026): якщо в data.json немає «composition», у звіті — попередження, що підставлено типовий склад;
+  «date», «number», «appeal»: null — як відсутні (раніше TypeError після всієї обробки); «У цьому висновку Суд…»
+  (переказ ЄСПЛ) не вважається самопосиланням; в ухвалі про відкриття відомості про призначення вилучаються й тоді, коли
+  стоять безпосередньо перед абзацом «Пропоную відкрити…»; абзац «Пропоную…» з виноскою чи посиланням не обриває збирання:
+  його вилучено правкою, а «Керуючись…» вставлено окремим абзацом; невикористані константи PALATA і PIDSUMOK_START вилучено.
 Версія 1.6 (26.11.2026): «check» бачить нерозривний дефіс у номерах («№ М‑6362/0/7-25»): раніше такі абзаци в порівнянні
   «відхилити все» з висновком хибно рахувалися як незбіжні, а в «БУЛО / СТАЛО» номер друкувався без дефіса.
 Версія 1.5 (25.11.2026): автозаміна «цього Висновку / до Висновку» з великої літери має ті самі винятки, що й з малої
@@ -50,7 +55,6 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_TEMPLATE = os.path.join(HERE, 'Шаблон_рішення_ДП.docx')
 
 HEADING_III = 'ІІІ. ВИСНОВКИ ТРЕТЬОЇ ДИСЦИПЛІНАРНОЇ ПАЛАТИ ВИЩОЇ РАДИ ПРАВОСУДДЯ'
-PALATA = 'Третя Дисциплінарна палата Вищої ради правосуддя'
 DEFAULT_COMPOSITION = {'chair': 'Олександр САСЕВИЧ',
                        'members': ['Олег КАНДЗЮБА', 'Дмитро КРУПОДЕРЯ', 'Ольга ПОПІКОВА']}
 APPEAL = ('Рішення Третьої Дисциплінарної палати Вищої ради правосуддя може бути оскаржене '
@@ -65,9 +69,6 @@ KERUIUCHYS = {'prytiahnennia': 'Керуючись викладеним, ' + OSN
 TEMPLATES = {'prytiahnennia': 'Шаблон_рішення_ДП.docx', 'vidmova': 'Шаблон_рішення_ДП.docx',
              'vidkryttia': 'Шаблон_ухвали_відкриття_ДП.docx'}
 APPEALS = {'vidkryttia': 'Ухвала оскарженню не підлягає.'}
-PIDSUMOK_START = ('Розглянувши висновок дисциплінарного інспектора Вищої ради правосуддя Плескача В.Ю. за результатами '
-                  'попередньої перевірки дисциплінарної скарги, Третя Дисциплінарна палата Вищої ради правосуддя '
-                  'вважає, що наведені у скарзі та встановлені фактичні обставини можуть свідчити про наявність у діях ')
 PEREVIRKA = ('Перевірка та дослідження наведених обставин будуть здійснюватися дисциплінарним інспектором '
              'під час підготовки дисциплінарної справи до розгляду.')
 # самопосилання «Висновок» → назва документа палати
@@ -77,7 +78,7 @@ AUTO = {'rishennia': [('цього Висновку', 'цього рішення
                     ('до Висновку', 'до ухвали'), ('цей Висновок', 'ця ухвала')]}
 # те саме з малої літери (1.4): не в цитатах «…» і не про висновки інших органів («цього висновку органу опіки»)
 LC_NOT = (r'(?!\s+(?:орган\w*|ВККС|Консультативн\w*|Венеційськ\w*|експерт\w*|КРЄС|ЄСПЛ|№|N\s?\d|\(?\d|Ради|ради|[Кк]омісі\w*|[Кк]омітет\w*|'
-          r'служб\w*|суду|Суду|інспектор\w*|прокурор\w*|Бюро|ГРЕКО|GRECO|ОБСЄ|щодо))')
+          r'служб\w*|суду|Суду|[Сс]уд\b|інспектор\w*|прокурор\w*|Бюро|ГРЕКО|GRECO|ОБСЄ|щодо))')
 REF = r'\b(?:пункт|підпункт|розділ|абзац|таблиц|додат|виноск)\w*\s+[^.;«»]{0,40}?'
 LC_RX = {'цього': re.compile(REF + r'\bцього висновку\b' + LC_NOT),
          'цьому': re.compile(r'(?<!\w)[УуВв] цьому висновку\b' + LC_NOT),
@@ -566,6 +567,10 @@ def locate(pkg):
     loc['zakl'] = loc['propose'] if loc['propose'] is not None else (zk[-1] if zk else None)
     tail_from = loc['zakl'] + 1 if loc['zakl'] is not None else max(lo, last - 4)
     loc['appoint'] = [i for i in range(tail_from, last + 1) if T[i] and APPOINT.search(T[i])]
+    # 1.7: відомості про призначення можуть стояти і безпосередньо перед абзацом «Пропоную відкрити…»
+    pre = loc['zakl'] - 1 if loc['zakl'] is not None else None
+    if pre is not None and pre > lo and T[pre] and APPOINT.search(T[pre]) and re.search(r'посад[уі] судді', T[pre]):
+        loc['appoint'].insert(0, pre)
     return loc
 
 
@@ -790,10 +795,12 @@ def validate(data):
     if not isinstance(op, list) or not op or not all(isinstance(x, str) and x.strip() for x in op):
         bad.append('поле "operative" має бути непорожнім списком рядків')
     for k in ('date', 'number', 'appeal', 'keruiuchys', 'pidsumok'):
-        if k in data and data[k] is not None and not isinstance(data[k], str):
+        if k in data and data[k] is None:          # null = поле не задано (1.7)
+            del data[k]
+        if k in data and not isinstance(data[k], str):
             bad.append(f'поле "{k}" має бути рядком')
     comp = data.get('composition')
-    if comp and not (isinstance(comp.get('chair'), str) and isinstance(comp.get('members'), list)
+    if comp and not (isinstance(comp, dict) and isinstance(comp.get('chair'), str) and isinstance(comp.get('members'), list)
                      and all(isinstance(m, str) for m in comp['members'])):
         bad.append('"composition": {"chair": "Ім’я ПРІЗВИЩЕ", "members": ["…", "…"]}')
     if 'zakl' in data and data['zakl'] is not None:
@@ -927,9 +934,15 @@ def cmd_build(a):
         report.append('додано правками: «Розглянувши висновок…», «Перевірка та дослідження…», «Керуючись…»')
     elif loc['propose'] is not None:
         pp = P[loc['propose']]
-        tracked_replace(pp, ptext(pp), ker, tr, whole=True)
-        if pp.find(w('pPr')) is not None:
-            unnumber(pp.find(w('pPr')), tr)
+        try:
+            tracked_replace(pp, ptext(pp), ker, tr, whole=True)
+            if pp.find(w('pPr')) is not None:
+                unnumber(pp.find(w('pPr')), tr)
+        except ValueError as ex:                  # у абзаці виноска / посилання: вилучити й вставити новий (1.7)
+            tracked_delete_para(pp, tr)
+            pp = tracked_insert_para(pp, ker, pp, tr, plain=True)
+            report.append(f'абзац «Пропоную…» p{loc["propose"]} містить виноску чи поле ({ex}) — вилучено правкою, '
+                          '«Керуючись…» вставлено окремим абзацом; виноску перенести вручну, якщо вона потрібна')
         for i in loc['propose_items']:
             if T[i]:
                 tracked_delete_para(P[i], tr)
@@ -987,6 +1000,9 @@ def cmd_build(a):
             break
         pkg.body.remove(el); removed += 1; k += 1
     comp = data.get('composition') or DEFAULT_COMPOSITION
+    if not data.get('composition'):
+        report.append('УВАГА: «composition» не задано — підставлено типовий склад: головуючий '
+                      f'{comp["chair"]}, члени {", ".join(comp["members"])}; звірити зі складом на день засідання')
     tail = [copy.deepcopy(x) for x in tail_t]
     new_tail = []
     for el in tail:

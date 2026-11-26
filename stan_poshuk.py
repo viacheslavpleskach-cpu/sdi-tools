@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Пошук в індексі історії «Стан розгляду справ» (01.01.2023 – 30.10.2026) для висновків.
 
+Версія 1.5 (26.11.2026): `--sud` (sprava, suddia, sud, spysok) розуміє «м.» = «міста», будь-який апостроф і зайві
+пробіли; якщо справу знайдено, але не в суді з `--sud`, — так і сказано, з переліком судів, де вона є (раніше
+«Справу … в індексі не знайдено»).
 Версія 1.4 (26.11.2026): `sprava` попереджає, коли номер справи старший за найранішу реєстрацію в індексі
 (справу передано з іншого чи ліквідованого суду, напр. з ОАСК, або перша інстанція завершилася до 01.2023):
 «реєстрація» тоді — надходження до цього суду, а попередній етап треба брати з ЄДРСР.
@@ -86,6 +89,18 @@ def need_duckdb():
 def key(case):
     s = re.sub(r'\s+', '', (case or '')).lower()
     return re.sub(r'-[^/0-9-]{1,4}$', '', s)
+
+
+def court_norm(s):
+    """Назва суду для порівняння: малі літери, «м.» = «міста», один вид апострофа, один пробіл."""
+    s = (s or '').lower().replace('’', "'").replace('ʼ', "'").replace('`', "'")
+    s = re.sub(r"(?<![\w'])м\.\s*", 'міста ', s)
+    return re.sub(r'\s+', ' ', s).strip()
+
+
+def sud_like(s):
+    """--sud для ILIKE: «м.» → «міста», апостроф будь-який (_)."""
+    return '%' + court_norm(s).replace("'", '_') + '%'
 
 
 def shard(k):
@@ -198,7 +213,11 @@ def cmd_sprava(a):
     if a.repo:
         rows += repo_rows(a.repo, a.case)
     if a.sud:
-        rows = [r for r in rows if a.sud.lower() in (r['court_name'] or '').lower()]
+        everywhere = sorted({r['court_name'] or '' for r in rows})
+        rows = [r for r in rows if court_norm(a.sud) in court_norm(r['court_name'])]
+        if not rows and everywhere:
+            print(f'Справу {a.case} (ключ {k}) в індексі знайдено, але не в суді «{a.sud}». Суди, де вона є: '
+                  + '; '.join(everywhere)); return
     if not rows:
         print(f'Справу {a.case} (ключ {k}) в індексі не знайдено.'); return
     if a.tsv:
@@ -307,7 +326,7 @@ def cmd_suddia(a):
     duckdb = need_duckdb()
     m = get('stan_suddi_misiats.parquet', a); g = get('stan_suddi_intervaly.parquet', a)
     con = duckdb.connect()
-    sud = f'%{a.sud}%' if a.sud else '%'
+    sud = sud_like(a.sud) if a.sud else '%'
     jl = re.sub(r'\s+', ' ', a.suddia.strip())
     courts = con.execute(f"select distinct court_name from '{m}' where court_name ilike ? and suddia ilike ? order by 1",
                          [sud, jl + '%']).fetchall()
@@ -345,7 +364,7 @@ def cmd_sud(a):
     duckdb = need_duckdb()
     m = get('stan_suddi_misiats.parquet', a)
     con = duckdb.connect()
-    for (c,) in con.execute(f"select distinct court_name from '{m}' where court_name ilike ? order by 1", [f'%{a.sud}%']).fetchall():
+    for (c,) in con.execute(f"select distinct court_name from '{m}' where court_name ilike ? order by 1", [sud_like(a.sud)]).fetchall():
         print('=' * 100); print(c)
         print(con.execute(f"""select ym місяць, provadzhen_z_rukhom "з рухом", rozpodileno розподілено, pryznachen "(пере)призначень",
               rozghlianuto розглянуто, bez_rukhu "без руху", povernuto повернуто from '{m}' where court_name=? and suddia='*' order by 1""", [c]).fetchdf().to_string(index=False))
@@ -360,7 +379,7 @@ def cmd_spysok(a):
     fs = all_shards(a)
     con = duckdb.connect(); con.execute('SET threads=4')
     w, p = ['1=1'], []
-    if a.sud: w.append('court_name ilike ?'); p.append(f'%{a.sud}%')
+    if a.sud: w.append('court_name ilike ?'); p.append(sud_like(a.sud))
     if a.suddia: w.append('(judge ilike ? or judges ilike ?)'); p += [f'%{a.suddia}%'] * 2
     if a.etap: w.append('stage_name ilike ?'); p.append(f'%{a.etap}%')
     if a.uchasnyk: w.append('participants ilike ?'); p.append(f'%{a.uchasnyk}%')

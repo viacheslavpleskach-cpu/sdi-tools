@@ -22,6 +22,9 @@ https://drive.google.com/drive/folders/1lK8gmOJoflDSMCIlFaSeX3OEB_As2Myh (фай
 прізвищем (ім'я, по батькові та суд збігаються) — перед використанням у висновку перевірити.
 Потрібен openpyxl (pip install openpyxl --break-system-packages, якщо його немає).
 
+Версія 1.2 (26.11.2026): `--sud` перевіряється і тоді, коли знайдено одного суддю: суд у базі інший — попередження
+(можливе відрядження або тезка), раніше мовчки показувався суддя іншого суду; якщо файл бази в теці Диска за назвою
+не знайдено і взято запасний ID, це зазначено в рядку «Джерело» (база може бути застарілою).
 Версія 1.1 (25.11.2026): дата списку ВККС і дата бази беруться з самого файла (раніше «19.10.2026» було вшито);
 попередження, якщо `--sud` не збігся з жодним судом; `--sud` розуміє «м.» = «міста» (лише в назві суду: у ПІБ «М.» —
 ініціал) і суд у непрямому відмінку («Печерського районного суду» — порівняння із suddi_poshuk.py); із кількох файлів бази
@@ -87,6 +90,9 @@ def stamp(path):
     return dt.datetime.fromtimestamp(os.path.getmtime(path)).strftime('%d.%m.%Y %H:%M')
 
 
+FALLBACK_USED = False
+
+
 def file_id():
     """ID файлу бази: шукає в теці Диска файл «База_актів_призначення_суддів….xlsx» за назвою
     (якщо базу завантажено заново, її ID змінюється); не знайдено чи тека недоступна — запасний FILE_ID."""
@@ -105,6 +111,8 @@ def file_id():
             return (exact or sorted(found, key=lambda x: (title_date(x[1]), x[1])))[-1][2]
     except Exception:
         pass
+    global FALLBACK_USED
+    FALLBACK_USED = True
     return FILE_ID
 
 
@@ -128,7 +136,9 @@ def get_base(local, refresh):
     if refresh or not fresh:
         try:
             download()
-            return CACHE, f'Google Диск, {FOLDER} — завантажено {stamp(CACHE)}'
+            fb = ('; файл бази в теці за назвою не знайдено — узято запасний ID, база може бути застарілою'
+                  if FALLBACK_USED else '')
+            return CACHE, f'Google Диск, {FOLDER} — завантажено {stamp(CACHE)}{fb}'
         except Exception as e:
             if not os.path.exists(CACHE):
                 sys.exit(f'Не вдалося завантажити базу з Диска ({e}). Завантажте «База_актів_призначення_суддів.xlsx» '
@@ -228,10 +238,11 @@ def main():
     rows = load(path)
     print(f'Джерело: «База_актів_призначення_суддів.xlsx» ({src}); {pokryttia()}.')
     found = find(rows, args[0])
-    if sud and len(found) > 1:
+    if sud and found:
         here = [r for r in found if same_court(sud, r['court'])]
         if not here:
-            print(f'⚠ --sud «{sud}» не збігся з жодним судом знайдених суддів — показано всіх.')
+            print(f'⚠ --sud «{sud}» не збігся з судом ' + ('знайденого судді' if len(found) == 1 else 'жодного зі знайдених суддів')
+                  + ' — можливе відрядження або тезка; показано ' + ('його' if len(found) == 1 else 'всіх') + '.')
         found = here or found
     if not found:
         print(f'«{args[0]}» у базі не знайдено (перевірте написання — потрібен називний відмінок; база охоплює діючих суддів: {pokryttia()}).')

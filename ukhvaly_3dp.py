@@ -5,6 +5,10 @@ ukhvaly_3dp.py — підготовка проєктів ухвал Третьо
   «Про відмову у відкритті дисциплінарних справ» (розділ 2 порядку денного)
 
 Автор: В'ячеслав Плескач
+Версія 1.7 (26.11.2026): без «composition» у JSON — попередження, що підставлено типовий склад; «composition» іншого
+формату — зрозуміла помилка до збирання (потрібні «gen» і «sign»); якщо в порядку денному не знайдено заголовків
+розділів 2 чи 3 — попередження, а не мовчазний зсув меж розділів; жіночий рід інспектора — за будь-яким жіночим
+по батькові («-івна», «-ївна», «-ична», «-інична»).
 Версія 1.6 (25.11.2026): `before_conclusion` — у порядку JSON (раніше навпаки); файли з однаковою назвою в архіві
 й у різних теках не губляться; довга пропозиція не обрізається; дати з неможливим місяцем не розпізнаються як дати;
 пропущені файли (без слова «висновок») і файли, які не вдалося прочитати, — у звіті; py7zr ставиться сам;
@@ -143,12 +147,16 @@ def collect_inputs(paths, workdir):
 # ---------------------------------------------------------------- порядок денний
 def parse_agenda(text):
     t = text
-    i2 = t.find('2.  Розгляд висновків')
-    if i2 < 0:
-        i2 = t.find('Розгляд висновків дисциплінарних інспекторів Вищої ради правосуддя про відкриття')
+    m2 = re.search(r'2\.\s*Розгляд висновків', t)
+    i2 = m2.start() if m2 else t.find('Розгляд висновків дисциплінарних інспекторів Вищої ради правосуддя про відкриття')
     i3 = t.find('складених за результатами попередньої перевірки')
-    i3 = t.rfind('\n', 0, i3)
     i4 = t.find('Процедурні і організаційні питання')
+    for i, what in ((i2, '«2. Розгляд висновків…»'), (i3, '«…складених за результатами попередньої перевірки…»')):
+        if i < 0:                                     # 1.7: раніше межі розділів мовчки зсувалися
+            print(f'УВАГА: у порядку денному не знайдено заголовка розділу {what} — розділи 2 і 3 розібрано '
+                  'ненадійно, перевірте пункти вручну.', file=sys.stderr)
+    i2 = max(i2, 0)
+    i3 = t.rfind('\n', 0, i3) if i3 >= 0 else (i4 if i4 > 0 else len(t))
     sec2 = t[i2:i3]
     sec3 = t[i3:i4 if i4 > 0 else len(t)]
     m = re.search(r'засідання Третьої Дисциплінарної палати Вищої ради правосуддя\s+' + DATE_W, t)
@@ -219,7 +227,7 @@ def parse_conclusion(path, text):
         info['inspector'], info['verb'] = INSPECTORS[surname]
     elif m:
         info['inspector'] = f'{m.group(1).capitalize()} {m.group(2)[0]}.{m.group(3)[0]}.'
-        info['verb'] = 'склала' if m.group(3).upper().endswith('ІВНА') or m.group(3).upper().endswith('ЇВНА') else 'склав'
+        info['verb'] = 'склала' if m.group(3).upper().endswith('НА') else 'склав'   # -івна, -ївна, -ична, -інична
     else:
         info['inspector'], info['verb'] = None, None
     # дата висновку
@@ -500,9 +508,19 @@ def cmd_build(a):
         bad.append('"before_conclusion" має бути списком рядків')
     if bad:
         sys.exit('Помилки в JSON (нічого не зібрано):\n  - ' + '\n  - '.join(bad))
+    comp = data.get('composition')
+    if comp:                                              # 1.7: формат перевіряється до збирання
+        okp = lambda x: isinstance(x, dict) and isinstance(x.get('gen'), str) and isinstance(x.get('sign'), str)
+        if not (isinstance(comp, dict) and okp(comp.get('chair')) and isinstance(comp.get('members'), list)
+                and comp['members'] and all(okp(x) for x in comp['members'])):
+            sys.exit('Помилка в JSON: «composition» має бути {"chair": {"gen": "Сасевича О.М.", "sign": "Олександр САСЕВИЧ"}, '
+                     '"members": [{"gen": "…", "sign": "…"}, …]} (нічого не зібрано)')
+    else:
+        comp = DEFAULT_COMPOSITION
+        print('УВАГА: «composition» не задано — підставлено типовий склад: головуючий ' + comp['chair']['sign'] + ', члени '
+              + ', '.join(m['sign'] for m in comp['members']) + '; звірити зі складом на день засідання.')
     kind = data['kind']
     single = bool(data.get('single'))
-    comp = data.get('composition') or DEFAULT_COMPOSITION
     d = load_template(a.template)
     body = d.element.body
     ph = {}
