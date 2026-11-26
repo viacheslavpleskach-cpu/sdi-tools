@@ -5,6 +5,9 @@ ukhvaly_3dp.py — підготовка проєктів ухвал Третьо
   «Про відмову у відкритті дисциплінарних справ» (розділ 2 порядку денного)
 
 Автор: В'ячеслав Плескач
+Версія 1.8 (26.11.2026): назви файлів зі ZIP без позначки UTF-8 — і в кодуванні cp1125 (7-Zip, WinRAR в
+українській DOS-розкладці): «Данўлова» → «Данілова»; той самий текст висновку в кількох файлах (DOC і RTF тощо)
+відкидається не мовчки, а з рядком у звіті «однаковий текст».
 Версія 1.7 (26.11.2026): без «composition» у JSON — попередження, що підставлено типовий склад; «composition» іншого
 формату — зрозуміла помилка до збирання (потрібні «gen» і «sign»); якщо в порядку денному не знайдено заголовків
 розділів 2 чи 3 — попередження, а не мовчазний зсув меж розділів; жіночий рід інспектора — за будь-яким жіночим
@@ -87,6 +90,22 @@ def to_text(path, workdir):
     return norm(r.stdout.decode('utf-8', 'replace'))
 
 
+def zip_name(n):
+    """Назва з ZIP без позначки UTF-8: UTF-8, інакше OEM-кодування; cp1125 (українські і, ї, є, ґ) — коли
+    cp866 дає «Ў/ў» чи недопустимі символи (1.8)."""
+    b = n.encode('cp437')
+    try:
+        return b.decode('utf-8')
+    except UnicodeDecodeError:
+        pass
+    v866 = b.decode('cp866', 'replace')
+    try:
+        v1125 = b.decode('cp1125')
+    except UnicodeDecodeError:
+        return v866
+    return v1125 if re.search('[Ўў\ufffd]', v866) else v866
+
+
 def unpack(path, dest):
     os.makedirs(dest, exist_ok=True)
     if path.lower().endswith('.zip'):
@@ -94,11 +113,7 @@ def unpack(path, dest):
         for i in z.infolist():
             n = i.filename
             if not (i.flag_bits & 0x800):
-                for enc in ('utf-8', 'cp866'):
-                    try:
-                        n = n.encode('cp437').decode(enc); break
-                    except Exception:
-                        pass
+                n = zip_name(n)
             if n.endswith('/'):
                 continue
             p = os.path.join(dest, os.path.basename(n))
@@ -396,7 +411,7 @@ def cmd_extract(a):
         if not agenda[sec]:
             print(f'УВАГА: у порядку денному не знайдено пунктів {title} — перевірте заголовки розділів.', file=sys.stderr)
     files = collect_inputs(a.inputs, work)
-    concls, failed, skipped, seen_hash, names = [], list(BAD_ARCHIVES), [], set(), {}
+    concls, failed, skipped, seen_hash, names, dups = [], list(BAD_ARCHIVES), [], {}, {}, []
     for f in files:
         if os.path.abspath(f) == os.path.abspath(a.agenda):
             continue
@@ -406,9 +421,9 @@ def cmd_extract(a):
         if 'висновок' not in re.sub(r'(?<=[А-ЯІЇЄҐ]) (?=[А-ЯІЇЄҐ]( |$|\n))', '', t[:3000]).lower():   # і «В И С Н О В О К»
             skipped.append(os.path.basename(f)); continue
         h = hash(t)
-        if h in seen_hash:
-            continue
-        seen_hash.add(h)
+        if h in seen_hash:                                 # 1.8: не мовчки
+            dups.append(f'{os.path.basename(f)} = {seen_hash[h]}'); continue
+        seen_hash[h] = os.path.basename(f)
         concls.append(parse_conclusion(f, t))
         nm = concls[-1]['file']                           # різні висновки з однаковою назвою файла
         names[nm] = names.get(nm, 0) + 1
@@ -417,7 +432,8 @@ def cmd_extract(a):
         concls[-1]['text_path'] = os.path.join(work, f'c{len(concls):03d}.txt')
         open(concls[-1]['text_path'], 'w', encoding='utf-8').write(t)
     rep = match(agenda, concls)
-    data = {'agenda': agenda, 'conclusions': concls, 'match': rep, 'failed': failed, 'skipped': skipped}
+    data = {'agenda': agenda, 'conclusions': concls, 'match': rep, 'failed': failed, 'skipped': skipped,
+            'duplicates': dups}
     json.dump(data, open(a.out, 'w', encoding='utf-8'), ensure_ascii=False, indent=1)
     md = report_md(agenda, concls, rep)
     if failed:
@@ -425,6 +441,9 @@ def cmd_extract(a):
     if skipped:
         md += ('\n\n## Пропущено (на початку файла немає слова «висновок» — перевірити, чи це не висновок)\n'
                + '\n'.join(f'- {x}' for x in skipped))
+    if dups:
+        md += ('\n\n## Однаковий текст (узято перший файл, решту не розбирали)\n'
+               + '\n'.join(f'- {x}' for x in dups))
     if a.report:
         open(a.report, 'w', encoding='utf-8').write(md)
     print(md)

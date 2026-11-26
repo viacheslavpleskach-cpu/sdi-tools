@@ -1,6 +1,12 @@
 #!/usr/bin/env python3
 """Пошук в індексі історії «Стан розгляду справ» (01.01.2023 – 30.10.2026) для висновків.
 
+Версія 1.6 (26.11.2026): в індексі немає змін за 01–29.10.2026 (між ретроархівом до 30.09.2026 і знімком на
+30.10.2026 — лише сам знімок), тому примітка без --repo тепер називає саме цей проміжок; клон stan-rozghliadu-arkhiv
+поруч із sdi-tools, у домашній теці чи в STAN_REPO підхоплюється автоматично (вимкнути — --bez-repo); --repo читає
+знайдені файли як CSV, тож записи з розривом рядка всередині поля (номер справи, провадження, учасники) більше не
+губляться; у spysok дата реєстрації — найраніша дата, а не найменший рядок «ДД.ММ.РРРР» (раніше помилка в 0,7 %
+проваджень, де дат реєстрації кілька).
 Версія 1.5 (26.11.2026): `--sud` (sprava, suddia, sud, spysok) розуміє «м.» = «міста», будь-який апостроф і зайві
 пробіли; якщо справу знайдено, але не в суді з `--sud`, — так і сказано, з переліком судів, де вона є (раніше
 «Справу … в індексі не знайдено»).
@@ -24,8 +30,9 @@ https://drive.google.com/drive/folders/145g1zR_CA36DwwBLhKXnYKPrI2ls-rTi (дос
 Ключ справи: нижній регістр, без пробілів, без кінцевого суфікса «-к», «-ц», «-а»… («757/28368/24-к» → «757/28368/24»),
 тож різні записи того самого номера знаходяться разом.
 
-Записи після 30.10.2026 (жовтневий шар і щоденні зміни) — у GitHub stan-rozghliadu-arkhiv; якщо репозиторій
-склоновано, передайте --repo <тека>, і скрипт додасть їх до хронології.
+Зміни за 01–29.10.2026 (жовтневий шар) і після 30.10.2026 (щоденні) — у GitHub stan-rozghliadu-arkhiv; індекс має
+за жовтень лише знімок на 30.10.2026. Клон репозиторію поруч із sdi-tools (../stan-rozghliadu-arkhiv), у домашній теці
+або в змінній STAN_REPO підхоплюється автоматично; інакше передайте --repo <тека>; --bez-repo — лише індекс.
 
 Команди:
   stan_poshuk.py sprava "757/28368/24-к" [--sud "Печерський"] [--repo DIR] [--tsv out.tsv]
@@ -184,22 +191,55 @@ COLS = ['snapshot_date', 'change', 'court_name', 'case_number', 'case_proc', 'ty
 
 def repo_rows(repo, case):
     """Записи з архіву GitHub (жовтневий шар і щоденні файли) для справи."""
-    import glob, lzma, csv
+    import glob, lzma, csv, io
     k = key(case)
     out = []
     files = sorted(glob.glob(os.path.join(repo, 'data', '*', '*', '*.tsv.xz')))
+    needle = (k.split('/')[1] if '/' in k else k)
+    rec = re.compile(r'\d{4}-\d\d-\d\d\t')
+
+    def take(row):
+        if key(re.sub(r'\s+', ' ', row.get('case_number', ''))) == k and row.get('stage_name'):
+            out.append({c: row.get(c, '') for c in COLS})
     for f in files:
-        r = subprocess.run(['xzgrep', '-h', '-i', '-F', k.split('/')[1] if '/' in k else k, f], capture_output=True)
+        r = subprocess.run(['xzgrep', '-h', '-i', '-F', needle, f], capture_output=True)
         if not r.stdout:
             continue
         with lzma.open(f, 'rt', encoding='utf-8') as fh:
             h = fh.readline().rstrip('\n').split('\t')
-        for line in r.stdout.decode('utf-8', 'replace').splitlines():
-            x = next(csv.reader([line], delimiter='\t'))
-            row = dict(zip(h, x))
-            if key(row.get('case_number', '')) == k and row.get('stage_name'):
-                out.append({c: row.get(c, '') for c in COLS})
+        lines = r.stdout.decode('utf-8', 'replace').splitlines()
+        # 1.6: запис цієї справи з непарною кількістю лапок у першому рядку триває в наступних (розрив рядка всередині
+        # поля) — такий файл читається повністю як CSV, щоб запис не загубився і колонки не зсунулися; рядки-продовження
+        # інших записів пропускаються
+        def broken(l):                                   # початок запису цієї справи, що триває в наступних рядках
+            f5 = l.split('\t')
+            return len(f5) > 4 and needle.lower() in f5[4].lower() and l.count('"') % 2 == 1
+        if not any(rec.match(l) and broken(l) for l in lines):
+            for l in lines:
+                if rec.match(l):
+                    take(dict(zip(h, next(csv.reader([l], delimiter='\t')))))
+            continue
+        with lzma.open(f, 'rt', encoding='utf-8', newline='') as fh:
+            rd = csv.reader(fh, delimiter='\t')
+            next(rd)
+            for x in rd:
+                if needle.lower() in x[4].lower() if len(x) > 4 else False:
+                    take(dict(zip(h, x)))
     return out
+
+
+def find_repo(a):
+    """--repo, або клон stan-rozghliadu-arkhiv поруч із sdi-tools, у домашній теці чи в STAN_REPO (1.6)."""
+    if a.repo or getattr(a, 'bez_repo', False):
+        return a.repo
+    here = os.path.dirname(os.path.abspath(__file__))
+    for c in (os.environ.get('STAN_REPO'), os.path.join(here, '..', 'stan-rozghliadu-arkhiv'),
+              os.path.expanduser('~/stan-rozghliadu-arkhiv')):
+        if c and os.path.isdir(os.path.join(c, 'data')):
+            print(f'Додано зміни з клону stan-rozghliadu-arkhiv: {os.path.abspath(c)} (знайдено автоматично; --bez-repo — без них)')
+            a.repo = os.path.abspath(c)
+            return a.repo
+    return None
 
 
 # ---------- sprava ----------
@@ -210,6 +250,7 @@ def cmd_sprava(a):
     con = duckdb.connect()
     q = f"select {', '.join(COLS)} from read_parquet('{f}') where k = ?"
     rows = [dict(zip(COLS, r)) for r in con.execute(q, [k]).fetchall()]
+    find_repo(a)
     if a.repo:
         rows += repo_rows(a.repo, a.case)
     if a.sud:
@@ -318,7 +359,8 @@ def cmd_sprava(a):
               + (f', {last["cause_result"]}' if last['cause_result'] else ''))
     print('\n' + NOTE)
     if not a.repo:
-        print('Записи після 30.10.2026 тут не враховано: додайте --repo <клон stan-rozghliadu-arkhiv> або перевірте поточний файл data.gov.ua.')
+        print('Зміни за 01–29.10.2026 (в індексі за жовтень лише знімок на 30.10.2026) і після 30.10.2026 тут не враховано: '
+              'додайте --repo <клон stan-rozghliadu-arkhiv> або перевірте поточний файл data.gov.ua.')
 
 
 # ---------- suddia / sud ----------
@@ -395,7 +437,7 @@ def cmd_spysok(a):
         sys.exit(f'{name}: не розпізнано дату «{s}» (потрібно РРРР-ММ-ДД або ДД.ММ.РРРР).')
     if a.vid: w.append(f'{sd} >= ?'); p.append(iso(a.vid, '--vid'))
     if a.do: w.append(f'{sd} <= ?'); p.append(iso(a.do, '--do'))
-    q = f"""select court_name, case_number, case_proc, type, min(registration_date) registration, count(*) zapysiv,
+    q = f"""select court_name, case_number, case_proc, type, strftime(min(try_strptime(registration_date, '%d.%m.%Y')), '%d.%m.%Y') registration, count(*) zapysiv,
             count(distinct stage_date) filter (where stage_name='Призначено до судового розгляду') pryznachen,
             min({sd}) persha_stadiia, max({sd}) ostannia_stadiia, any_value(judge) judge
             from read_parquet({fs}) where {' and '.join(w)} group by all order by court_name, persha_stadiia"""
@@ -413,6 +455,7 @@ def main():
     ap.add_argument('--dir'); ap.add_argument('--kesh', default=os.path.expanduser('~/.cache/stan_indeks'))
     sp = ap.add_subparsers(dest='cmd', required=True)
     s = sp.add_parser('sprava'); s.add_argument('case'); s.add_argument('--sud'); s.add_argument('--repo'); s.add_argument('--tsv')
+    s.add_argument('--bez-repo', action='store_true', dest='bez_repo')
     s = sp.add_parser('suddia'); s.add_argument('suddia'); s.add_argument('--sud'); s.add_argument('--vyd')
     s = sp.add_parser('sud'); s.add_argument('sud')
     s = sp.add_parser('spysok')
