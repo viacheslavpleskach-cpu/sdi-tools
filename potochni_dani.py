@@ -3,7 +3,8 @@
 розгляду». Обидва набори щодня перезаписуються, тому скрипт щоразу бере свіжий файл (кешує його до наступного
 оновлення набору).
 
-Автор: В'ячеслав Плескач. Версія 1.2 (27.11.2026): основне джерело — сайт ДСА (court.gov.ua/opendata, ті самі
+Автор: В'ячеслав Плескач. Версія 1.3 (27.11.2026): --dzherelo auto — свіжіший із двох джерел: сайт ДСА або data.gov.ua, якщо
+в нього новіший знімок (stan) чи файл новіший більш ніж на 12 год (spisok). Версія 1.2 (27.11.2026): основне джерело — сайт ДСА (court.gov.ua/opendata, ті самі
 файли, оновлюються щодня; data.gov.ua після збою 19.11.2026 відповідає, але віддає знімки 15–16.11.2026):
 stan — https://dsa.court.gov.ua/dsa/inshe/oddata/532/, spisok — …/oddata/513/. --dzherelo auto (типово: сайт ДСА,
 а якщо не відповідає — data.gov.ua) | portal | dsa. Версія 1.1 (21.11.2026): резервне джерело — сайт ДСА.
@@ -38,7 +39,7 @@ def meta_portal(kind):
         r = sorted(rs, key=lambda r: re.search(r'vid-(\d\d)-(\d\d)-(\d{4})', r['name']).groups()[::-1])[-1]
     else:
         r = rs[0]
-    return r['url'], r['name'], meta['metadata_modified'], 'data.gov.ua'
+    return r['url'], r['name'], meta['metadata_modified'], 'data.gov.ua', r.get('last_modified') or meta['metadata_modified']
 
 
 def meta_dsa(kind):
@@ -64,12 +65,28 @@ def meta_dsa(kind):
         lm = email.utils.parsedate_to_datetime(lm).astimezone(dt.timezone.utc).replace(tzinfo=None).isoformat()
     except Exception:
         pass
-    return url, name, lm, f'сайт ДСА (oddata/{n})'
+    return url, name, lm, f'сайт ДСА (oddata/{n})', lm
+
+
+SVIZHIST_H = 12  # на скільки годин файл data.gov.ua має бути новішим за файл ДСА, щоб брати його (режим auto)
+
+
+def _vers(kind, m):
+    """Ключ свіжості: для stan — дата знімка з назви файлу, далі час файлу (UTC, ISO); для spisok — час файлу."""
+    d = re.search(r'vid-(\d\d)-(\d\d)-(\d{4})', m[1])
+    t = (m[4] or '')[:19]
+    try:
+        ts = dt.datetime.fromisoformat(t).replace(tzinfo=dt.timezone.utc).timestamp()
+    except ValueError:
+        ts = None
+    return (d.groups()[::-1] if (kind == 'stan' and d) else None), ts
 
 
 def fresh(kind, cache, src='auto'):
+    """auto (1.3): свіжіший із двох — сайт ДСА (основне) або data.gov.ua, якщо в нього новіший знімок (stan) чи файл
+    новіший більш ніж на SVIZHIST_H год (spisok), або якщо ДСА не відповідає."""
     os.makedirs(cache, exist_ok=True)
-    got = None
+    got = por = None
     if src in ('auto', 'dsa'):
         try:
             got = meta_dsa(kind)
@@ -77,9 +94,21 @@ def fresh(kind, cache, src='auto'):
             if src == 'dsa':
                 sys.exit(f'Сайт ДСА не відповідає: {e}')
             print('Сайт ДСА не відповідає — резервне джерело: data.gov.ua (може бути застарілим)', file=sys.stderr)
-    if got is None:
+    if src == 'portal' or got is None:
         got = meta_portal(kind)
-    url, name, stamp_v, where = got
+    elif src == 'auto':
+        try:
+            por = meta_portal(kind)
+        except Exception as e:
+            print(f'data.gov.ua не відповідає ({str(e)[:60]}) — звірку свіжості пропущено', file=sys.stderr)
+        if por:
+            (dd, dts), (pd, pts) = _vers(kind, got), _vers(kind, por)
+            newer = (pd > dd) if (pd and dd and pd != dd) else bool(dts and pts and pts - dts > SVIZHIST_H * 3600)
+            if newer:
+                print(f'[{kind}] файл data.gov.ua новіший за файл сайту ДСА ({por[1]}, {por[4][:16]} проти '
+                      f'{got[1]}, {got[4][:16]} UTC) — беру з порталу', file=sys.stderr)
+                got = por
+    url, name, stamp_v, where = got[:4]
     path = os.path.join(cache, name)
     stamp = path + '.stamp'
     if not (os.path.exists(path) and os.path.exists(stamp) and open(stamp).read() == stamp_v):
@@ -126,7 +155,7 @@ def main():
     ap.add_argument('--from', dest='dfrom'); ap.add_argument('--to', dest='dto')
     ap.add_argument('--cache', default='potochni_cache'); ap.add_argument('--out')
     ap.add_argument('--dzherelo', choices=['auto', 'portal', 'dsa'], default='auto',
-                    help='auto — сайт ДСА, а якщо не відповідає — data.gov.ua; portal; dsa')
+                    help='auto — свіжіший із двох (сайт ДСА; data.gov.ua — якщо новіший або ДСА не відповідає); portal; dsa')
     a = ap.parse_args()
     if not (a.case or a.court or a.judge):
         sys.exit('Задайте --case, --court або --judge.')
