@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Пошук протоколів автоматизованого розподілу прямо у відкритих даних (без покажчика на Диску).
 
-Автор: В'ячеслав Плескач. Версія 2.2 (26.11.2026): --from / --to / --around — РРРР-ММ-ДД або ДД.ММ.РРРР, як в інших скриптах (раніше
+Автор: В'ячеслав Плескач. Версія 2.3 (27.11.2026): --dzherelo auto — основне джерело сайт ДСА (повніший набір:
+28.04.2021 і далі, дозавантаження після 08.02.2026), data.gov.ua лише доповнює дні, яких немає на ДСА (напр. 18.07.2025);
+звірка 27.11.2026: спільні дні побайтово однакові (sha256). Версія 2.2 (26.11.2026): --from / --to / --around — РРРР-ММ-ДД або ДД.ММ.РРРР, як в інших скриптах (раніше
 ДД.ММ.РРРР давало traceback). Версія 2.1 (25.11.2026): мітки полів усередині квадратних дужок («[Примітки: Наказ…]» у причині
 виключення судді) більше не обривають перелік виключених суддів і не занижують excluded_count; номер справи порівнюється
 без пробілів, регістру й кінцевого суфікса (-к, -ц, -а), як в інших скриптах; відсутні в наборі дні й помилки
@@ -13,8 +15,8 @@
   - сайт ДСА https://dsa.court.gov.ua/dsa/inshe/oddata/757/ (паспорт open_data_json.php?json=757) — той самий набір,
     ширше: з 28.04.2021; з 17.11.2026 ДСА дозавантажує період після 08.02.2026. 09.02–03.03.2026 — погодинні
     архіви, з 04.03.2026 — добові з 24 погодинними JSON усередині.
---dzherelo auto (типово): дні, які є на data.gov.ua, — з порталу, решта — із сайту ДСА; якщо портал не
-відповідає — усе з ДСА. --dzherelo portal | dsa — лише одне джерело.
+--dzherelo auto (типово): дні, які є на сайті ДСА, — з ДСА, решта (напр. 18.07.2025) — з data.gov.ua; якщо ДСА
+не відповідає — усе з порталу (лише 2022–08.02.2026). --dzherelo portal | dsa — лише одне джерело.
 Скрипт завантажує архіви лише за заданий проміжок днів, відбирає протоколи за номером справи / судом /
 суддею і розбирає їх текст. Повтори одного протоколу (той самий DOC_DBID + DOC_ID у кількох архівах) відкидає.
 
@@ -278,25 +280,25 @@ def resources_dsa():
 
 def resources(src):
     """→ {день: [(url, назва, джерело)]}, примітка про джерело."""
+    # 2.3: основне — сайт ДСА (з 28.04.2021, дозавантаження після 08.02.2026); портал лише доповнює відсутні дні
     portal, dsa, note = {}, {}, ''
-    if src in ('auto', 'portal'):
-        try:
-            portal = resources_portal()
-        except Exception as e:
-            if src == 'portal':
-                raise SystemExit(f'data.gov.ua не відповідає: {e}')
-            note = 'data.gov.ua не відповідає — дані із сайту ДСА (oddata/757)'
     if src in ('auto', 'dsa'):
         try:
             dsa = resources_dsa()
         except Exception as e:
-            if not portal:
-                raise SystemExit(f'Недоступні і data.gov.ua, і сайт ДСА: {e}')
-            note = f'сайт ДСА не відповідає ({str(e)[:80]}) — лише data.gov.ua'
-    res = {d: [(u, n, 'data.gov.ua') for u, n in v] for d, v in portal.items()}
-    for d, v in dsa.items():
+            if src == 'dsa':
+                raise SystemExit(f'Сайт ДСА не відповідає: {e}')
+            note = f'сайт ДСА не відповідає ({str(e)[:80]}) — лише data.gov.ua (2022–08.02.2026)'
+    if src in ('auto', 'portal'):
+        try:
+            portal = resources_portal()
+        except Exception as e:
+            if not dsa:
+                raise SystemExit(f'Недоступні і сайт ДСА, і data.gov.ua: {e}')
+    res = {d: [(u, n, 'сайт ДСА') for u, n in v] for d, v in dsa.items()}
+    for d, v in portal.items():
         if d not in res:
-            res[d] = [(u, n, 'сайт ДСА') for u, n in v]
+            res[d] = [(u, n, 'data.gov.ua') for u, n in v]
     return res, note
 
 
@@ -361,7 +363,7 @@ def main():
     ap.add_argument('--cache', default='protokoly_portal_cache')
     ap.add_argument('--keep', action='store_true', help='не видаляти завантажені архіви днів')
     ap.add_argument('--dzherelo', choices=['auto', 'portal', 'dsa'], default='auto',
-                    help='auto — data.gov.ua, а дні, яких там немає (чи весь набір, якщо портал не відповідає), — сайт ДСА')
+                    help='auto — сайт ДСА, а дні, яких там немає (чи весь набір, якщо ДСА не відповідає), — data.gov.ua')
     ap.add_argument('--zvit-dir', help='тека для повних текстів звітів про автоматизований розподіл')
     ap.add_argument('--out')
     a = ap.parse_args()

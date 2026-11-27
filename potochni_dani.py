@@ -3,9 +3,10 @@
 розгляду». Обидва набори щодня перезаписуються, тому скрипт щоразу бере свіжий файл (кешує його до наступного
 оновлення набору).
 
-Автор: В'ячеслав Плескач. Версія 1.1 (21.11.2026): резервне джерело — сайт ДСА (court.gov.ua/opendata, ті самі
-файли): stan — https://dsa.court.gov.ua/dsa/inshe/oddata/532/, spisok — …/oddata/513/. --dzherelo auto (типово:
-data.gov.ua, а якщо не відповідає — сайт ДСА) | portal | dsa.
+Автор: В'ячеслав Плескач. Версія 1.2 (27.11.2026): основне джерело — сайт ДСА (court.gov.ua/opendata, ті самі
+файли, оновлюються щодня; data.gov.ua після збою 19.11.2026 відповідає, але віддає знімки 15–16.11.2026):
+stan — https://dsa.court.gov.ua/dsa/inshe/oddata/532/, spisok — …/oddata/513/. --dzherelo auto (типово: сайт ДСА,
+а якщо не відповідає — data.gov.ua) | portal | dsa. Версія 1.1 (21.11.2026): резервне джерело — сайт ДСА.
 
   stan   — https://data.gov.ua/dataset/7e659fca-90c7-4002-bd96-00f9dbbbd251 (архів ~900 МБ; Верховний Суд — уся
            історія з 2018 р., місцеві й апеляційні суди — лише записи з рухом за останні тижні)
@@ -69,15 +70,15 @@ def meta_dsa(kind):
 def fresh(kind, cache, src='auto'):
     os.makedirs(cache, exist_ok=True)
     got = None
-    if src in ('auto', 'portal'):
+    if src in ('auto', 'dsa'):
         try:
-            got = meta_portal(kind)
+            got = meta_dsa(kind)
         except Exception as e:
-            if src == 'portal':
-                sys.exit(f'data.gov.ua не відповідає: {e}')
-            print('data.gov.ua не відповідає — резервне джерело: сайт ДСА', file=sys.stderr)
+            if src == 'dsa':
+                sys.exit(f'Сайт ДСА не відповідає: {e}')
+            print('Сайт ДСА не відповідає — резервне джерело: data.gov.ua (може бути застарілим)', file=sys.stderr)
     if got is None:
-        got = meta_dsa(kind)
+        got = meta_portal(kind)
     url, name, stamp_v, where = got
     path = os.path.join(cache, name)
     stamp = path + '.stamp'
@@ -125,7 +126,7 @@ def main():
     ap.add_argument('--from', dest='dfrom'); ap.add_argument('--to', dest='dto')
     ap.add_argument('--cache', default='potochni_cache'); ap.add_argument('--out')
     ap.add_argument('--dzherelo', choices=['auto', 'portal', 'dsa'], default='auto',
-                    help='auto — data.gov.ua, а якщо не відповідає — сайт ДСА; portal; dsa')
+                    help='auto — сайт ДСА, а якщо не відповідає — data.gov.ua; portal; dsa')
     a = ap.parse_args()
     if not (a.case or a.court or a.judge):
         sys.exit('Задайте --case, --court або --judge.')
