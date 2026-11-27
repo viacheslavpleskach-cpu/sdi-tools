@@ -2,7 +2,8 @@
 """Відкриті дані Вищої ради правосуддя на data.gov.ua: попередні скарги скаржника чи щодо судді, склад
 Дисциплінарної палати на дату, звірка «Реєстру_рішень_ВРП.csv», пошук у текстах актів, одноосібні акти.
 
-Автор: В'ячеслав Плескач. Версія 1.0 (27.11.2026).
+Автор: В'ячеслав Плескач. Версія 1.1 (27.11.2026): `zvirka` звіряє також «номер без суфікса + дата», тож описки в номерах
+(1175/0/15-19 замість 15-18) не дають хибних пропусків. 1.0 (27.11.2026) — перша версія.
 
 Набори (розпорядник — ВРП; дзеркала на сайті ДСА немає):
   rishennia — https://data.gov.ua/dataset/16a4fb23-e65d-4a4a-956d-32f5f2d14dd4
@@ -414,9 +415,25 @@ def cmd_sklad(a):
     print('# Головуючого набір не зазначає — брати з тексту ухвали чи рішення («у складі головуючого – …»).')
 
 
+class RegKeys(set):
+    """Номери реєстру + пари «номер без суфікса, дата» (з колонки date або назви файлу): описка в номері
+    («15-19» замість «15-18») не дає хибного «немає в реєстрі»."""
+    def __init__(self, R):
+        super().__init__(norm_num(r['number']) for r in R)
+        self.pd = set()
+        for r in R:
+            p = norm_num(r['number']).split('/')[0]
+            for d in [r.get('date') or ''] + re.findall(r'\d\d\.\d\d\.\d{4}', r.get('title') or ''):
+                if d:
+                    self.pd.add((p, d))
+
+    def has(self, num, day):
+        return norm_num(num) in self or (norm_num(num).split('/')[0], ddmm(day) if '-' in day else day) in self.pd
+
+
 def reg_rows(path):
     R = list(csv.DictReader(open(path, encoding='utf-8')))
-    return R, {norm_num(r['number']) for r in R}
+    return R, RegKeys(R)
 
 
 def cmd_zvirka(a):
@@ -432,7 +449,7 @@ def cmd_zvirka(a):
         if k in seen or not SUB.search(x.get('title') or ''):
             continue
         seen.add(k)
-        if norm_num(x['decisionNum']) not in RN:
+        if not RN.has(x['decisionNum'], x['day']):
             out.append({'dzherelo': 'rishennia JSON', 'data': ddmm(x['day']), 'nomer': x['decisionNum'], 'organ': x['org'],
                         'nazva': re.sub(r'\s+', ' ', x['title']), 'fail': '; '.join(x['texts']) or '(тексту немає)',
                         'posylannia': '', 'golosy': f'{x.get("votingFor")}/{x.get("votingAgainst")}'})
@@ -507,8 +524,8 @@ def zvirka_xlsx(a, RN, have):
     for x in xlsx_lists(a, single=False):
         t = re.sub(r'\s+', ' ', str(x.get('title') or ''))
         n = re.sub(r'\s|№', '', str(x.get('number') or ''))
-        if SUB.search(t) and norm_num(n) not in RN and n not in have:
-            dd = str(x.get('date') or '')[:10]
+        dd = str(x.get('date') or '')[:10]
+        if SUB.search(t) and not RN.has(n, dd) and n not in have:
             out.append({'dzherelo': x['_res'], 'data': ddmm(dd), 'nomer': n, 'organ': '', 'nazva': t, 'fail': '',
                         'posylannia': x.get('link') or x.get('url') or '',
                         'golosy': f'{x.get("vote_for") or ""}/{x.get("vote_agains") or ""}'})
