@@ -8,8 +8,11 @@
 
 ```bash
 git clone --depth 1 https://github.com/viacheslavpleskach-cpu/sdi-tools && cd sdi-tools
-bash get.sh        # edrsr_vybirka.py з edrsr-tool + check; посилання на реєстр ВП ВС, якщо поруч є клон postanovi
+bash get.sh        # edrsr_vybirka.py з edrsr-tool (клон, коміт і sha256); посилання на реєстр ВП ВС, якщо поруч є клон postanovi
+cd ~ && python3 -I ~/sdi-tools/edrsr_vybirka.py check   # перевірка доступу — окремою командою, за потреби
 ```
+
+Скрипти запускати окремими командами після `get.sh`, з `-I`. Якщо запуск заблоковано — не пробувати інший шлях, а попросити користувача підтвердити запуск у чаті.
 
 Скрипт ЄДРСР тут не зберігається: єдина копія — публічний репозиторій [edrsr-tool](https://github.com/viacheslavpleskach-cpu/edrsr-tool) (`edrsr.py`); його використовують і скіл «edrsr-court-decisions», і `get.sh` (зберігає як `edrsr_vybirka.py`). Зміни вносити лише там.
 
